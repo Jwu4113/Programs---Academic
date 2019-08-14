@@ -1,0 +1,490 @@
+---
+title: "459_hiv"
+author: "WeiDai"
+date: "April 9, 2019"
+output: html_document
+---
+
+# Preliminaries
+
+```{r message=FALSE}
+library(readxl)
+library(haven)
+library(gghighlight)
+library(corrr);library(nlme);library(lme4)
+library(geepack)
+library(tidyverse)
+```
+
+```{r}
+hivfu_raw <- read_excel("data/Project2 HIVFU.xls") %>% as.data.frame()
+il2 <- read_sas("data/il2.sas7bdat", NULL)
+```
+ 
+Research Question
+
+* Does IL-2(grp A) has an significant effect on HIV viral load("rtpcrnih") than control group(grp B) from 14 months post-randomization onwards?
+
+* In this case, less viral load means better outcome. I recode HIV viral load("rtpcrnih") to "1" as below detectable virus threshold and "0" as above.  This aims to study the odds of having good outcomes between 2 treatment groups from 14 months post-randomization onwards.
+
+# Exploratory data analysis
+
+```{r}
+ggplot(data = hivfu_raw, aes(x = wknumc, y = rtpcrnih, group = id)) +   
+  geom_line(aes(col = id), alpha = 0.5, show.legend = F ) +
+  #scale_y_continuous(limits = c(0, 120000)) +
+  theme_bw() + 
+  facet_wrap( ~ grp) + 
+  labs(title = "Individual viral load from mth 14 to 60 before transformation between 2 grps")
+```
+
+```{r}
+ggplot(data = hivfu_raw, aes(x = wknumc, y = rtpcrnih)) + 
+  geom_smooth(size = 2, col = "black", method = "loess") +
+  geom_line(aes(col = id),alpha = 0.5, show.legend = F ) +
+  labs(title = "Overall viral load from mth 14 to 60 before transformation", 
+       subtitle = "black bold line is the loess mean profile")
+```
+
+```{r}
+ggplot(data = hivfu_raw, aes(x = wknumc, y = log(rtpcrnih), group = id)) +   
+  geom_line(aes(col = id), alpha = 0.5, show.legend = F ) +
+  #scale_y_continuous(limits = c(0, 120000)) +
+  theme_bw() + 
+  facet_wrap( ~ grp) +
+  labs(title = "Individual viral load from mth 14 to 60 after transformation between 2 grps")
+```
+
+```{r}
+ggplot(data = hivfu_raw, aes(x = wknumc, y = log(rtpcrnih))) + 
+  geom_smooth(size = 2, col = "black", method = "loess") +
+  geom_line(aes(col = id),alpha = 0.5, show.legend = F ) +
+  labs(title = "Overall viral load from mth 14 to 60 after transformation", 
+       subtitle = "black bold line is the loess mean profile")
+```
+
+## Construct a groupedData Object(spread and gather)
+
+resp ~ cov | group
+
+```{r}
+hiv_grouped <- groupedData(formula = rtpcrnih ~ wknumc | id, data = hivfu_raw[,-c(3, 5)], order.groups = F)
+```
+
+```{r}
+hiv_spread <- hiv_grouped %>% 
+  mutate(wknumc = paste0(wknumc)) %>% 
+  spread(wknumc, rtpcrnih) 
+```
+
+```{r}
+hiv_gather <- hiv_spread %>% 
+  gather(`14`, `18`, `24`, `30`, `36`, `42`, `48`, `54`, `60`, key = wknumc, value =  rtpcrnih) %>% 
+  mutate(wknumc = as.numeric(wknumc)) %>% 
+  arrange(grp, id)
+```
+
+## visualization
+
+```{r}
+hiv_spread %>%
+  count(grp)
+```
+
+```{r}
+a <- hivfu_raw %>% count(id)
+ggplot(data = a, aes(x = 1:58, y = n)) +
+  geom_point() +
+  labs(title = "check for missingness of repeated measures",
+       x = "id", 
+       y = "counts") +
+  theme_bw() +
+  geom_hline(yintercept = 3.1, col = "red")
+```
+
+The plot shows the missingness of each individual. Each id should have 9 complete viral load measurements. Here, I set the threadhold as n = 3. For individual has 3 or less recorded measurements will be excluded from the analysis. 
+
+```{r}
+hiv_spread %>% filter(is.na(`30`)) %>% group_by(id) 
+```
+
+Here, we can see that the individuals excluded from analysis are severe cases. I think here we have sufficient reasons to assume that these individal have died or dropped out. There is no reason to impute these large numbers. 
+
+The drawback is that group B has 5 excluded and A has 1. That might cause problems in the following analysis.
+
+
+group by time points
+```{r}
+hivfu_raw %>% group_by(wknumc) %>% 
+  summarise(min = min(rtpcrnih),
+            median = median(rtpcrnih),
+            mean = mean(rtpcrnih),
+            max = max(rtpcrnih),
+            missing = 58 - n())
+```
+
+Here, the untransformed mean is much larger than median. We can tell that the distribution of viral load is right skewed. 
+
+```{r}
+hivfu_raw %>% group_by(wknumc) %>% 
+  summarise(min = min(log(rtpcrnih)),
+            median = median(log(rtpcrnih)),
+            mean = mean(log(rtpcrnih)),
+            max = max(log(rtpcrnih)),
+            missing = 58 - n())
+```
+
+The mean and median after log transformation are much closer to each other than untransformed. This indicates that a log transformation is a better option. 
+
+## mean plots
+
+? add title, captiona etc
+```{r}
+mean_untrans <- hivfu_raw %>% 
+  group_by(grp, wknumc) %>% 
+  summarise(mean = mean(rtpcrnih), sd = sd(rtpcrnih))
+
+mean_log <-  hivfu_raw %>% 
+  group_by(grp, wknumc) %>% 
+  summarise(mean = mean(log(rtpcrnih)), sd = sd(log(rtpcrnih)))
+
+pd <- position_dodge(2) # move them 2 to the left and right
+
+ggplot(mean_untrans, aes(x = wknumc, y = mean, col = grp)) +
+    geom_errorbar(aes(ymin = mean - sd, 
+                      ymax = mean + sd),
+                  width = 0.2, position = pd) +
+    geom_point(size = 2, position = pd) + 
+    geom_line(aes(group = grp), position = pd) +
+    scale_color_manual(values = c("purple", "darkorange")) +
+    theme_bw() +
+    labs("mean profile of viral load before log transformation")
+
+ggplot(mean_log, aes(x = wknumc, y = mean, col = grp)) +
+    geom_errorbar(aes(ymin = mean - sd, 
+                      ymax = mean + sd),
+                  width = 0.2, position = pd) +
+    geom_point(size = 2, position = pd) + 
+    geom_line(aes(group = grp), position = pd) +
+    scale_color_manual(values = c("red", "blue")) +
+    theme_bw()  +
+    labs("mean profile of viral load after log transformation")
+```
+
+Here, we can conclude from the visualization that there is a downward trend of time; grp A and grp B are almost parallel; grp A performs better in terms of mean viral load at each time point. The error bar of each time points doesn't really grow over time. This might provides some insights for furture analysis. 
+
+## imputation
+
+```{r}
+hiv_spread2 <- hiv_spread %>% filter(!is.na(`30`))  
+# filter out cases with very few measurements
+```
+
+a look at the missing value
+```{r}
+hiv_spread2[,-c(1:2)] %>% filter(!complete.cases(.)) %>% 
+  tail(10)
+```
+
+Strategy for imputation
+
+* Delete patient with 3 or less repeated measurements(6 patients)
+
+* I assume the NAs after 49 are still 49. (patients don't show up once their conditions get better)
+
+* Log transform the viral load.
+
+* Multiple impulation to the missing values.
+
+```{r echo=FALSE}
+temp_spread <-  hiv_spread2
+
+b <- temp_spread %>% filter(!complete.cases(.)) %>% 
+  filter(`14` == 49) %>% 
+  mutate(`18` = replace_na(`18`, 49))
+
+b <- temp_spread %>% filter(!complete.cases(.)) %>%  
+  filter(`18` == 49) %>% 
+  mutate(`24` = replace_na(`24`, 49)) %>% 
+  select(id) %>% as.matrix()
+
+for (i in 1:52){
+  if (temp_spread[i, 2] %in% b){
+    temp_spread[i, 5] <- 49
+  }
+}
+
+b <- temp_spread %>% filter(!complete.cases(.)) %>%  
+  filter(`24` == 49) %>% 
+  mutate(`30` = replace_na(`30`, 49))%>% 
+  select(id)%>% as.matrix()
+
+for (i in 1:52){
+  if (temp_spread[i, 2] %in% b){
+    temp_spread[i, 6] <- 49
+  }
+}
+
+b <- temp_spread %>% filter(!complete.cases(.)) %>% 
+  filter(`30` == 49) %>% 
+  mutate(`36` = replace_na(`36`, 49))%>% 
+  select(id)%>% as.matrix()
+
+for (i in 1:52){
+  if (temp_spread[i, 2] %in% b){
+    temp_spread[i, 7] <- 49
+  }
+}
+
+b <- temp_spread %>% filter(!complete.cases(.)) %>% 
+  filter(`36` == 49) %>% 
+  mutate(`42` = replace_na(`42`, 49))%>% 
+  select(id)%>% as.matrix()
+
+for (i in 1:52){
+  if (temp_spread[i, 2] %in% b){
+    temp_spread[i, 8] <- 49
+  }
+}
+
+b <- temp_spread %>% filter(!complete.cases(.)) %>% 
+  filter(`42` == 49) %>% 
+  mutate(`48` = replace_na(`48`, 49))%>% 
+  select(id)%>% as.matrix()
+
+for (i in 1:52){
+  if (temp_spread[i, 2] %in% b){
+    temp_spread[i,9] <- 49
+  }
+}
+
+b <- temp_spread %>% filter(!complete.cases(.)) %>% 
+  filter(`48` == 49) %>% 
+  mutate(`54` = replace_na(`54`, 49))%>% 
+  select(id)%>% as.matrix()
+
+for (i in 1:52){
+  if (temp_spread[i, 2] %in% b){
+    temp_spread[i, 10] <- 49
+  }
+}
+
+b <- temp_spread %>% filter(!complete.cases(.)) %>%  
+  filter(`54` == 49) %>% 
+  mutate(`60` = replace_na(`60`, 49))%>% 
+  select(id)%>% as.matrix()
+
+for (i in 1:52){
+  if (temp_spread[i, 2] %in% b){
+    temp_spread[i, 11] <- 49
+  }
+}
+```
+
+```{r}
+temp_gather <- temp_spread %>% 
+  gather(`14`, `18`, `24`, `30`, `36`, `42`, `48`, `54`, `60`, key = wknumc, value =  rtpcrnih) %>% 
+  mutate(wknumc = as.numeric(wknumc)) %>% 
+  arrange(grp, id) %>% 
+  mutate(lvload = round(log(rtpcrnih),2)) # log transform 
+
+
+imp_info <- mice::mice(temp_gather[,-4], m=5, maxit = 50, method = 'pmm', seed = 500)
+imp_gather <- mice::complete(imp_info, 1) # change number to check imputation
+#write.csv(imp_gather, "data/hiv_imputed.csv")
+```
+
+# repeated measures ANOVA
+
+mean plot
+```{r}
+mean_imp <- imp_gather %>% 
+  group_by(grp, wknumc) %>% 
+  summarise(mean = mean(lvload), sd = sd(lvload))
+  
+ggplot(mean_imp, aes(x = wknumc, y = mean, col = grp)) +
+    geom_errorbar(aes(ymin = mean - sd, 
+                     ymax = mean + sd),
+                width = 0.2, position = position_dodge(2)) +
+    geom_point(size = 2, position = pd) + 
+    geom_line(aes(group = grp), position = pd) +
+    scale_color_manual(values = c("red", "blue")) +
+    theme_bw() + 
+    labs("mean profiles for each group after imputation")
+```
+
+
+
+```{r}
+imp_spread <- imp_gather %>% 
+  mutate(wknumc = paste0(wknumc)) %>% 
+  spread(wknumc, lvload)
+
+
+hiv_cor <- hiv_spread %>% 
+  select(`14`:`60`) %>%
+  correlate(use = "pairwise.complete.obs", diagonal = 1, quiet = T) %>% 
+  #rearrange() %>%  # rearrange the correlation in order
+  shave(upper = F)  # delete half of the redundant values
+
+hiv_cor %>% fashion() # same as round()
+rplot(hiv_cor) # make fancy plots
+```
+
+```{r}
+rmaov <- lme(lvload ~ grp + factor(wknumc) + grp * factor(wknumc), data = imp_gather, random = ~1 | id, correlation = corCompSymm(form = ~wknumc | id))
+```
+
+```{r}
+car::Anova(rmaov)
+```
+
+```{r}
+anova.lme(rmaov)
+```
+
+Here, the time factor(wknumc) is very significant according to repeated measures ANOVA. While grp and grp time interaction are not significant(p value = 0.39 and 0.44). This verifies what we saw in the visualization.
+
+# linear mixed effect model
+
+## int only
+
+lmer(formular = outcome ~ fixed effect + (random effect | id))
+
+```{r}
+imp_gather <- imp_gather %>% 
+  mutate(time = wknumc - 14)
+```
+
+Here, I recode `wknumc` - 14 as `time` so that month 14 can be the baseline and can be better interpreted through the intercept.  
+
+```{r}
+lme_ict <- lmer(formula = lvload ~ 1 + time + grp + (1 |id), data = imp_gather, REML = T)
+```
+
+```{r}
+summary(lme_ict)
+```
+
+```{r}
+hiv_pred <- imp_gather %>% 
+  mutate(.pred_int = predict(lme_ict)) %>% 
+  mutate(resid_int  = residuals(lme_ict))
+```
+
+```{r}
+ggplot(data = hiv_pred, aes(x = time, y = .pred_int, col = grp)) +
+  geom_line(aes(group = id), alpha = 0.7) +
+  theme_bw()
+```
+
+## int and time effect
+
+
+```{r}
+lme_time <- lmer(formula = lvload ~ 1 + time * grp + (time ||id), data = imp_gather, REML = T)
+```
+
+```{r}
+summary(lme_time)
+```
+
+```{r}
+hiv_pred <- imp_gather %>% 
+  mutate(.pred_3 = predict(lme_time))%>% 
+  mutate(resid_3  = residuals(lme_time))
+```
+
+```{r}
+ggplot(data = hiv_pred, aes(x = time, y = .pred_3)) +
+  geom_line(aes(group = id, col = grp), alpha = 0.5) +
+  theme_bw()
+```
+
+```{r}
+anova(lme_ict, lme_time)
+```
+
+```{r}
+MuMIn::r.squaredGLMM(lme_ict)
+
+MuMIn::r.squaredGLMM(lme_time)
+```
+
+```{r}
+ggplot(data = hiv_pred, aes(x = resid_3)) +
+  geom_density(aes(col = grp)) +
+  labs(title = "Check the residuals' normality assumption")
+```
+
+############################################################
+
+```{r}
+imp_gather <- imp_gather %>% 
+  mutate(vcat = ifelse(lvload <= 3.90, 1, 0))
+
+imp_gather %>% 
+  group_by(grp) %>% 
+  count(vcat)
+```
+
+```{r}
+imp_gather %>% 
+  group_by(time) %>% 
+  summarise(prop = mean(vcat))
+```
+
+
+## GLMM
+
+```{r}
+#e <- glmer(vcat ~  time * grp + ( | id), data = imp_gather, family = "binomial")
+```
+
+I tried to use GLMM, but the model failed to converge and has very large eigenvalue.
+
+## GEE
+
+```{r}
+gee_ind <- geeglm(vcat ~  1 + time *grp, data = imp_gather, id = id, family = "binomial", scale.fix = T)
+
+gee_ex <- geeglm(vcat ~  1 + time *grp, data = imp_gather, id = id, family = "binomial", scale.fix = T, corstr = "exchangeable")
+
+gee_ar1 <- geeglm(vcat ~  1 + time *grp, data = imp_gather, id = id, family = "binomial", scale.fix = T, corstr = "ar1")
+
+gee_unstr <- geeglm(vcat ~  1 + time *grp, data = imp_gather, id = id, family = "binomial", scale.fix = T, corstr = "unstr")
+```
+
+```{r}
+list(gee_ind, gee_ex, gee_ar1, gee_unstr) %>% 
+  map(MuMIn::QIC)
+```
+
+```{r}
+summary(gee_ar1)
+```
+
+
+```{r}
+gee_pred <- imp_gather %>% 
+  mutate(pred_gee = predict(gee_ar1, type = "response"))
+
+gee_pred %>% ggplot() +
+  geom_line(aes(x = time, y = pred_gee, col = grp)) + 
+  theme_bw() +
+  labs(title = "Prbability of getting undetected viral load between 2 grps")
+```
+
+
+# Summary
+
+Research Question
+
+* Does IL-2(grp A) has an significant effect on HIV viral load("rtpcrnih") than control group(grp B) from 14 months post-randomization onwards?
+
+We use repeated measures ANOVA, linear mixed effect model and GEE to find out if there is a difference in effect between 2 treatment groups. 
+
+All evidence suggests that there is not a significant effect between treatments. 
+
+The treatment effect is slightly better for grp A. IL-2(Grp A) does not have an significant effect in reducing HIV viral load from mth 14 to 60 than group B. 
+
