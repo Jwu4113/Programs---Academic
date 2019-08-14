@@ -1,0 +1,660 @@
+---
+title: "431 Project Study 1"
+author: "Joshua Wu"
+date: "December 13th 2018"
+output:
+  rmdformats::readthedown:
+    highlight: kate
+    number_sections: true
+    code_folding: show
+---
+
+```{r setup, message=FALSE}
+
+knitr::opts_chunk$set(comment=NA)
+options(width = 70)
+
+```  
+
+```{r initial_setup, cache=FALSE, message = FALSE, warning = FALSE}
+
+## Load Love-boost then the packages
+source("Love-boost.R")
+
+library(knitr); library(rmdformats); library(magrittr)
+library(skimr); library(Hmisc); library(Epi); library(vcd);library(readxl);
+library(tidyverse) 
+
+## Global options
+
+options(max.print="75")
+opts_chunk$set(comment=NA,
+               message=FALSE,
+               warning=FALSE)
+opts_knit$set(width=75)
+
+## Skim options (leave out histograms)
+
+skimr::skim_with(numeric = list(hist = NULL),
+                 integer = list(hist = NULL))
+
+```
+
+# Reading in and Merging Survey Datasets:
+
+The survey data comes from three csv files and two xls files. These files, when combined, will contain all of the variables that were asked in the questionnaire. We first will read the five files into R, while checking the dimensions of each file to make sure there were no errors in importing. 
+
+```{r Reading in the CSV raw files, message = FALSE}
+
+surv2018_01 <- read_csv("surv2018_01.csv")
+surv2018_02 <- read_csv("surv2018_02.csv")
+surv2018_03 <- read_csv("surv2018_03.csv")
+
+```
+
+```{r checking Dimensions}
+
+dim(surv2018_01)
+dim(surv2018_02)
+dim(surv2018_03)
+
+```
+
+```{r Reading in XLS raw files, message = FALSE}
+
+surv2018_04 <- read_xls("surv2018_04.xls", na = c("", "NA"))
+surv2018_05 <- read_xls("surv2018_05.xls", na = c("", "NA"))
+
+```
+
+```{r Again, checking Dimensions}
+
+dim(surv2018_04)
+dim(surv2018_05)
+
+```
+
+We then merge two of the three csv files, the ones with the same number of variables (`surv2018_01` and `surv2018_02` into `temp12`), and then we merge the two xls files (`surv2018_04` and `surv2018_05` into `temp45`). We then left join the merged csv files with the third csv file, making sure that the new file will contain all rows from the merged csv table and add any rows with matching keys from the third csv file (the key is the response_id) (`temp12` with `surv2018_03` into `temp123`). Finally, we merge the merged csv and xls files together to obtain our final merged table by using the same method as how we merged the merged csv file and the third csv file (`temp123` and `temp45` into `surv2018_full`).
+
+```{r Merging tables and creating the Final Table that we will be using}
+
+temp12 <- bind_rows(surv2018_01, surv2018_02)
+dim(temp12)
+
+temp45 <- bind_rows(surv2018_04, surv2018_05)
+dim(temp45)
+
+temp123 <- left_join(temp12, surv2018_03, by = "response_id")
+dim(temp123)
+
+temp12345 <- left_join(temp123, temp45, by = "response_id")
+dim(temp12345)
+
+surv2018_full <- temp12345 %>%
+    mutate_if(is.character, funs(as.factor(.))) %>%
+    mutate(response_id = as.character(response_id))
+
+rm(temp12, temp45, temp123, temp12345)
+
+```
+
+```{r Description of Full Dataset, eval=FALSE, include=FALSE}
+
+Hmisc::describe(surv2018_full)
+
+```
+
+# Creating new dataset with only the variables that are Required:
+
+There are 9 variables out of the 165 variables that we are interested for this study project. The questions used from the survey are as follows:
+
+## Quantitative Variables:
+
+001. `coder_077`: Please rate your agreement with the following statement: Prior to starting 431, I considered myself to be an expert at coding / computer programming.
+(0 = Strongly Disagree to 100 = Strongly Agree)
+002. `later_082`: Please rate your agreement with the following statement: I always choose to put off doing things as long as I possibly can. 
+(0 = Strongly Disagree to 100 = Strongly Agree)
+
+Below is a summary of these two variables:
+
+```{r}
+
+surv2018_full %>% skim(coder_077,later_082)
+
+```
+
+## Categorical (3+) Variables:
+
+003. `sroh_010`: How would you rate your current health overall? (Excellent, Very Good, Good, Fair, Poor)
+004. `sleepq_017`: Over the past 30 days, how would you rate the quality of your sleep? (Excellent, Very Good, Good, Fair, Poor)
+005. `redblue_055`: Which of the following best describes your political views? (Very conservative, Conservative, Somewhat conservative, Moderate, Somewhat liberal, Liberal, Very liberal)
+
+Below is a summary of these three variables:
+
+```{r}
+
+surv2018_full %>% skim(sroh_010, sleepq_017, redblue_055)
+
+```
+
+## Binary Variables:
+
+006. `female_003`: Do you identify as female? (Y/N)
+007. `checkup_018`: In the past 12 months, have you visited a health care provider for a routine checkup? (Y/N)
+008. `politic_021`: "Do you consider yourself to be a politically engaged person? 
+(“Politically engaged” refers to feeling meaningfully invested in the results of the political process, broadly speaking.)" (Y/N)
+009. `sleepok_033`: Do you feel that you generally get enough sleep? (Y/N)
+
+Below is a summary of these four variables:
+
+```{r}
+
+surv2018_full %>% skim(female_003,checkup_018,politic_021,sleepok_033)
+
+```
+
+Below is the code creating a new dataset with only the variables of interest into a new dataset `surv2018_new`:
+
+```{r Create new Dataset, only using the Variables needed for Own Analysis}
+
+surv2018_new <- surv2018_full %>%
+  select(coder_077, sleepok_033, sleepq_017, later_082, female_003, checkup_018, politic_021, redblue_055, sroh_010) %>% na.omit
+
+```
+
+# Data Management: Tidying the Data
+
+## Range and Missingness Checks:
+
+Below are the ranges where each variables should be and if there are any missing variables from the dataset `surv2018_new`. No variables had missing data. No variables had values outside of what they should have been.
+
+1. `coder_077` should fall within the range 0 to 100.
+2. `sleepq_017` should be Excellent, Fair, Good, Poor, or Very Good.
+3. `sleepok_033` should be either Yes or No.
+4. `later_082` should fall within 0 to 100.
+5. `female_003` should be Yes or No.
+6. `checkup_018` should be Yes or No.
+7. `politic_021` should be Yes or No.
+8. `redblue_055` should be Very Conservative, Conservative, Moderate, Liberal, and Very Liberal.
+9. `sroh_010` should be Excellent, Very Good, Good, Fair, Poor. 
+
+```{r range_checks_for_seven_easy_variables}
+
+surv2018_new %>%
+    select(coder_077, sleepq_017, sleepok_033, later_082, female_003, checkup_018, politic_021, redblue_055, sroh_010 ) %>%
+    Hmisc::describe()
+
+```
+
+# Collapsing Categories To Ensure That There Are Enough Observations Per Category:
+
+There are some variables that have low counts in various groups, making it so analyses on these variables would become invalid. Three variables were collapsed(`sleepq_017`, `redblue_055`, and `sroh_010`).
+
+## Collapsing Sleep (combine Excellent with Very Good and Poor with Fair):
+
+The first variable we collapsed was `sleepq_017`. There were small counts in "Fair", "Poor", "Very Good", and "Excellent". "Very Good" and "Excellent" were collapsed into one group ("Very Good") and "Fair" and "Poor" were collapsed together into "Fair". The new variable `newsleep` will contain only three groups (Very Good, Good, and Fair).
+
+```{r Collapsing Sleep}
+
+surv2018_new <- surv2018_new %>%
+    mutate(newsleep = fct_recode(sleepq_017, 
+                                 "Very Good" = "Excellent",
+                                 "Very Good" = "Very Good",
+                                 "Good" = "Good",
+                                 "Fair" = "Fair",
+                                 "Fair" = "Poor"))
+
+surv2018_new %>% count(sleepq_017, newsleep)
+
+```
+
+## Collapsing Categories for Political Spectrum (Collapse Conservative with Moderate):
+
+`redblue_055` was then collapsed. There were not enough counts for any of the Conservative groups by themselves. They were grouped with the Moderates. It was also found that there were not enough counts in "Somewhat Liberal", so it was grouped with "Liberal". The new variable `newredblue` would contain three categories (Moderate/Conservative, Liberal, Very Liberal).
+
+```{r Collapsing Political Spectrum}
+
+surv2018_new <- surv2018_new %>%
+    mutate(newredblue = fct_recode(redblue_055, 
+                                 "Moderate/Conservative" = "Moderate",
+                                 "Moderate/Conservative" = "Conservative",
+                                 "Moderate/Conservative" = "Somewhat conservative",
+                                 "Moderate/Conservative" = "Very conservative",
+                                 "Liberal" = "Liberal",
+                                 "Liberal" = "Somewhat liberal"))
+
+surv2018_new %>% count(redblue_055, newredblue)
+
+```
+
+## Collapsing Rating of Health (Combine Good with Fair):
+
+`sroh_010` was also collapsed. There were no counts for "Poor", and there were low counts for "Fair". "Fair" was combined with "Good" to ensure enough counts for analysis. The new variable, `newhealth`, contains three groups (Excellent, Very Good, Good/Fair).
+
+```{r Collapse Health Rating}
+surv2018_new <- surv2018_new %>%
+    mutate(newhealth = fct_recode(sroh_010, 
+                                 "Good/Fair" = "Fair",
+                                 "Good/Fair" = "Good"))
+
+surv2018_new %>% count(sroh_010, newhealth)
+
+```
+
+## Drop old variables:
+
+Finally, the old variables pre-collapsing were dropped from a new dataset `sur2018` and the new collapsed variables were included (`newsleep`, `newredblue`, and `newhealth`).
+
+```{r Dropping Variable that were not collapsed}
+
+sur2018 <- surv2018_new %>%
+  select(coder_077, sleepok_033, newsleep, later_082, female_003, checkup_018, politic_021, newredblue, newhealth) %>% na.omit
+
+```
+
+## Relevel Variables if needed:
+
+```{r}
+
+sur2018 <- sur2018 %>% mutate(newsleep = fct_relevel(newsleep, "Fair", "Good", "Very Good"), newhealth = fct_relevel(newhealth, "Good/Fair", "Very Good", "Excellent"), newredblue = fct_relevel(newredblue, "Moderate/Conservative", "Liberal", "Very liberal"), sleepok_033 = fct_relevel(sleepok_033, "Yes"), female_003 = fct_relevel(female_003, "Yes"), checkup_018 = fct_relevel(checkup_018, "Yes"), politic_021 = fct_relevel(politic_021, "Yes"))
+
+```
+
+
+# Codebook for Final Table:
+
+The 9 variables in our tidy data set for this project are as follows. There are no missing data in any variable. 
+
+Variable      | Type  | Description / Levels
+------------ | :---: | --------------------------------------------
+`coder_077`   | Quant | Please rate your agreement with the following statement: Prior to starting 431, I considered myself to be an expert at coding / computer programming.0 = Strongly Disagree to 100 = Strongly Agree
+`sleepok_033` | Cat-2 | Do you feel that you generally get enough sleep?
+`newsleep`    | Cat-3 | Over the past 30 days, how would you rate the quality of your sleep (Excellent, Very Good, Good, Fair, Poor)? (Excellent was combined with Very Good, and Poor was combined with Fair)
+`later_082`   | Quant | Please rate your agreement with the following statement: I always choose to put off doing things as long as I possibly can. 0 = Strongly Disagree to 100 = Strongly Agree
+`female_003`  | Cat-2 | yes, no: Do you identify as female?
+`checkup_018` | Cat-2 | yes, no: In the past 12 months, have you visited a health care provider for a routine checkup?
+`politic_021` | Cat-2 | yes, no: "Do you consider yourself to be a politically engaged person? (“Politically engaged” refers to feeling meaningfully invested in the results of the political process, broadly speaking.)"
+`newredblue`  | Cat-3 | Which of the following best describes your political views (Very conservative, Conservative, Somewhat conservative, Moderate, Somewhat liberal, Liberal, Very liberal)? (Moderate and All conservative levels were combined into one category. Liberal and Somewhat Liberal were also combined into one category)
+`newhealth`   | Cat-3 | How would you rate your current health overall (Excellent, Very Good, Good, Fair, Poor)? (Excellent was combined with Very Good, and Fair was combined with Poor)
+
+# Analysis 1b: Compare Two Population Means Using Independent Samples:
+
+`coder_077` and `sleepok_033` will be compared in this analysis of independent samples. The two populations will be those who answered "Yes" and those who answered "No" to the question if they generally got enough sleep. The mean `coder_077` will be the number of interest. There isn't anything to suggest that the values of `coder_077` for the "Yes" and "No" group of `sleepok_033` were matched or paired in any way. That is why independent sample analysis will be used. 
+
+Below is the range of `coder_077` data by `sleepok_033`:
+
+```{r code77 by sleepok33}
+
+mosaic::favstats(coder_077 ~ sleepok_033, data = sur2018)
+
+```
+
+## Graphical Summaries:
+
+We will next conduct graphical summaries to assess Normality. Firstly, a boxplot will be created. We can see below that there are outliers in the group that believe that they get enough sleep. We also see that there are signs of right-skew in both sleep assessment groups. 
+
+```{r boxplot_for_1b}
+
+ggplot(sur2018, aes(x = sleepok_033, y = coder_077)) + 
+  geom_violin(fill = "white") +
+  geom_boxplot(aes(fill = sleepok_033), width = 0.3, notch = TRUE) +
+  guides(fill = FALSE) +
+  labs(title = "Self-Assessment of Coding Right-Skewed for Those Who Believe They Get 
+       Enough Sleep and Those Who Don't",
+       subtitle = "n = 49 Students in 431: Fall 2018",
+       x = "", y = "Self-Assessment of Coding Expertise Prior to PQHS 431") +
+  theme_bw()
+
+```
+
+If we use a Normal Q-Q plot, we can confirm what the boxplot shows us. There is concern about whether a test that requires the Normal Distribution is a valid choice here. We should not assume Normality in our data. 
+
+```{r qqplots_for_1b}
+ggplot(sur2018, aes(sample = coder_077, col = sleepok_033)) +
+  geom_qq() + geom_qq_line() +
+  facet_wrap(~ sleepok_033) +
+  guides(col = FALSE) +
+  theme_bw() +
+  labs(y = "Observed Coding Self-Assessment Levels",
+       title = "Neither Sleep Assessment Groups Fit Well by a Normal Model")
+```
+
+## Numerical Summary:
+
+Below we calculate skew values for `coder_077` by `sleepok_033`. With values of at least 0.3 below, there is evidence to suggest that the outcome data is not normal. 
+
+```{r using_skew1_function_for_1b}
+
+by(sur2018$coder_077, sur2018$sleepok_033, skew1)
+
+```
+
+## Creating Confidence Intervals:
+
+Since our data is not Normal, we will be conducting the BOOTSTRAP method to obtain a 90% CI. Since we want to estimate the difference in population means, we will not be using the Rank-Sum test, which also does not require Normality.
+
+```{r bootdif_for_1b}
+
+set.seed(43101) 
+bootdif(sur2018$coder_077, sur2018$sleepok_033, conf.level = 0.90)
+
+```
+
+- The population mean of `coder_077` in those who said "YES" for `sleepok_033` is estimated to be about 8.2 points lower than the population mean of `coder_077` in those who said "NO" for `sleepok_033`.
+- Our 90% Confidence Interval for the difference (Yes~No) of the population means is (-16.9,0.38)
+- Assuming a two-sided interval, we conclude from the 90% Confidence Interval that there is no statistically significant difference in the true means of `coder_077` by `sleepok_033` group.
+- The assumptions of this bootstrap procedure are:
+    + that the samples in each group are drawn independently of each other 
+    + that the samples in each group represent a random sample of the population of interest
+    
+# Analysis 2: Comparing 3+ Population Means via ANOVA:
+
+We'll compare `coder_077` and `newsleep` using Analysis of Variance and related tools. We will be comparing mean `coder_077` scores across `newsleep` groups (Very Good, Good, Fair). We have no reason to believe that the groups are not independent. 
+
+## Summarizing the Distributions for the Three Sample Groups:
+
+Below is the range of `coder_077` by `newsleep` groups. As we can see there are no missing values. In addition, there are at least 10 observations in each group, so we do not have to worry about low counts. This was achieved by collapsing categories. 
+
+```{r describe coder_077 by newsleep}
+
+mosaic::favstats(coder_077 ~ newsleep, data = sur2018)
+
+```
+
+### Graphical Summaries:
+
+Below are boxplots of the data. From what we can see, the outcome variable is skewed in all three categories (Good, Fair, and Very Good). All three have outliers. From this boxplot, we assess that the outcome data is not Normal, like in Analysis 1b. ANOVA is known to be robust against Non-Normal data, so we will continue to run ANOVA for this analysis. 
+
+```{r comparison_boxplot_analysis_2}
+
+
+ggplot(sur2018, aes(x = newsleep, y = coder_077)) +
+  geom_violin() +
+  geom_boxplot(aes(fill = newsleep), width = 0.2) +
+  coord_flip() +
+  guides(fill = FALSE) +
+  theme_bw() +
+  labs(title = "Coding Self-Assessment Skewed by Quality of Sleep",
+       y = "Self-Assessment of Coding Expertise Prior to PQHS 431 (0-100)",
+       x = "")
+```
+
+### Numerical Summary:
+
+All values of skewness below indicate that there is a right skew in all three groups. Less so in the `Very Good` group, but again, ANOVA is fairly robust against non-Normal data. 
+
+```{r skew1_values_analysis2}
+
+by(sur2018$coder_077, sur2018$newsleep, skew1)
+
+```
+
+## Building Inferences to Compare the Three Populations:
+
+The Kruskal-Wallis Test doesn't assume Normality, which is great for this data, which has skewness. As shown below, we would conclude that there isn't a statistically significant difference between `coder_077` scores and `newsleep` categories.
+
+- The assumptions of the Kruskal-Wallis test are the same as those of the Wilcoxon-Mann-Whitney rank sum test.
+    + that the samples in each category are drawn independently of each other
+    + that the samples in each category represent a random sample of the population of interest
+
+```{r Kruskal-Wallis}
+
+kruskal.test(sur2018$coder_077 ~ sur2018$newsleep)
+
+```
+
+However, the Kruskal-Wallis test only tells us if there is a location shift; not very useful if we want to assess differences in population means. The Analysis of Variance compares the means of `coder_077` in the three `newsleep` populations. 
+
+```{r anova_analysis_2_via_lm}
+
+anova(lm(sur2018$coder_077 ~ sur2018$newsleep))
+
+```
+
+- Here we conclude that there is not a statistical difference at the 10% significance level. This can be concluded from the p-value obtained from the ANOVA F-test, 0.8749 is not less than 0.1. The population mean of `coder_077` does not significantly statistically differ between the three `newsleep` groups. 
+- `newsleep` accounts for $\eta^2 = \frac{96.3}{96.3 + 16528.8} = 0.006$ or 0.6% of the variation in `coder_077` scores in our sample.
+- Since it was found that there was no significant difference, no pairwise comparisons with Bonferroni or Tukey corrections will be conducted.
+- ANOVA will have the same set of assumptions of the pooled t test for two independent samples.
+    + that the samples in each category are drawn independently of each other, 
+    + that the samples in each category represent a random sample of the population of interest,
+    + the samples in each category are drawn from a Normally distributed population, 
+    + that either the sample sizes or the population variances are equal across the categories.
+
+Our conclusions are:
+
+- that the sample size is just too small in the `coder_077` categories to draw very firm conclusions. We would ideally like 30 observations per group, but we do not. 
+- There appears to be no evidence of a statistically significant difference in `coder_077` across the three `newsleep` categories, according to an ANOVA approach, at the 90% confidence level
+
+# Analysis 3: Regression Comparison of Means with Adjustment:
+
+In this analysis, we'll again compare `coder_077` by `sleepok_033` after adjusting for `later_082`. Below, we check the range and missingness in the new `later_082` variable within the `sur2018` data frame.
+
+```{r favstats_later_082_in_sur2018}
+
+mosaic::favstats(~ later_082, data = sur2018)
+
+```
+
+There are no missing values, and every response falls within the range specified (0-100).
+
+## The Regression Model, Adjusting for a Single Quantitative Covariate:
+
+```{r main_linear_model_analysis3}
+
+summary(lm(coder_077 ~ sleepok_033 + later_082, data = sur2018))
+
+```
+
+From the linear regression model, we see that at the 90% Confidence Level, neither `sleepok_033` responses has a significant relationship with `coder_077` while controlling for `later_082` nor does `later_082` have a significant relationship with `coder_077` while controlling for `sleepok_033`. 
+
+```{r anova_for_linear_model_analysis3}
+
+anova(lm(coder_077 ~ sleepok_033 + later_082, data = sur2018))
+
+```
+
+To confirm the results of the linear regression model, we used an ANOVA analysis on the linear model. As we saw from the summary of the linear regression model: 
+
+There does not seem to be a statistically significant effect of `sleepok_033` on `coder_077` after accounting for `later_082`. (P-value is 0.1330, which is greater than 0.1)
+
+Combined, the `sleepok_033` and `later_082` variables account for $\eta^2 = \frac{802.7}{802.7 + 36.8 + 15785.6} = 0.0483$ or 4.83% of the variation in `coder_077` which is a small improvement over the 0.6% accounted for by `sleepok_033` alone in Analysis 2.
+
+## Predicting the outcome at the average level of the covariate for each group:
+
+```{r covariate_mean}
+sur2018 %>% summarize(mean(later_082))
+```
+
+At the mean level of `later_082`, which turns out to be about 45, we should be able to predict the values of `coder_077` for subjects in each of the three `sleepok_033` categories. 
+
+```{r making_predictions}
+
+# specify the regression model we're using
+model3 <- lm(coder_077 ~ sleepok_033 + later_082, data = sur2018)
+# specify the new data we'll need to predict for
+new3 <- data.frame(sleepok_033 = c("Yes","No"), 
+                   later_082 = rep(mean(sur2018$later_082), 2)
+                   )
+
+```
+
+Below, we will be obtaining our prediction intervals. We will use the `predict` function to obtain predictions with standard errors. 
+
+```{r get_regression_predictions}
+
+predict(model3, newdata = new3, 
+        interval = "prediction", level = 0.90) %>% 
+  knitr::kable()
+
+```
+
+Using the model above, we predict that a new subject with the mean level of our covariate `later_082` who believes that they do get enough sleep will have a `coder_077` score of 11.25 with a 90% prediction interval of (-20.4, 42.8). Since the minimum possible `coder_077` score is 0, there is an indication that our prediction model has flaws in it. A new subject who believes that they do get enough sleep will have a score of 19.43 with a 90% prediction interval of (-12.4, 51.3). This also indicates that our prediction model has flaws in it.  
+
+## Identifying Assumption Violations:
+
+Below we have residuals vs fitted values plot and a Q-Q plot. As we can clearly see, we have problems in both plots. In the Residual plot, the plot does not look like a fuzzy football. Also, the line angles downward, a potential problem with linearity. In the Q-Q plot, we can clearly see that the data is not Normal, which violates our normality assumption.
+
+```{r Residuals and a QQ plot}
+
+par(mfrow = c(1,2))
+plot(model3, which = 1:2)
+
+```
+
+# Analysis 4: Two-Way (2 x 2) Contingency Table:
+
+We'll look at the association of `checkup_018` with `female_003` in this analysis. The `checkup_018` variable and the `female_003` variable each have two levels, and we'll build a contingency table with `female_003` in the rows and `checkup_018` in the columns to begin our analysis.
+
+## Building the 2x2 Table from data:
+
+```{r better_english_priorr_table}
+
+sur2018$female_003 <- relevel(sur2018$female_003, "Yes")
+sur2018$checkup_018 <- relevel(sur2018$checkup_018, "Yes")
+
+t1 <- table(sur2018$female_003, sur2018$checkup_018)
+
+colnames(t1) <- c("Had a Checkup", "No Checkup" )
+rownames(t1) <- c("Female", "Male")
+
+knitr::kable(addmargins(t1))
+
+```
+
+## 2x2 Analysis:
+
+```{r twoby2_analysis4}
+
+twoby2(t1 + 2, conf.level = 0.90) # uses Bayesian augmentation, 90% confidence level
+
+```
+
+The analysis above used Bayesian Augmentation to supplement the original 2x2 table. 
+
+The relative risk of Having a check-up within the last year given the respondent is Female vs. having a check-up within the last year given the respondent is male is estimated to be 0.98, and based on its 90% confidence interval is clearly not statistically significantly different from 1 at $\alpha = 0.10$.
+
+The Odds Ratio of Having a check-up within the last year given the respondent is Female vs. having a check-up within the last year given the respondent is male is estimated to be 0.96, and based on its 90% confidence interval is clearly not statistically significantly different from 1 at $\alpha = 0.10$ as well.
+
+Using a chi-square test of independence, we can see at the 90% confidence interval that there is no significant association between the sex of the respondent and whether or not they had a check-up within the last year. 
+
+### Checking Assumptions:
+
+Every cell has at least 10 observations. Due to this, we are comfortable with conducting a chi-square test of independence.
+
+# Analysis 5: Two-Way (2 x 3) Contingency Table:
+
+In this analysis, we'll look at the association of two categorical factors we created earlier: `politic_021` and `newredblue`. We're interested in whether there is an association between their political ideology, and whether they consider themselves politically active. The `politic_021` data have two levels, and the `newredblue` data have three levels.
+
+## Building the 2x3 Table from data:
+
+Below is the 2x3 Table of the two variables we selected. 
+
+```{r analysis 5 table}
+
+sur2018$politic_021 <- relevel(sur2018$politic_021, "Yes")
+
+t2 <- table(sur2018$politic_021, sur2018$newredblue)
+
+knitr::kable(addmargins(t2))
+
+```
+
+## Testing Association between Rows and Columns of a Contingency Table:
+
+### Running the Pearson $\chi^2$ Test:
+
+Below is the Chi-square test of the two variables of interest. Due to low counts in some cells, we might not be comfortable conducting the chi-square test. Regardless, the results tell us that there is no association between political ideology and whether or not the respondents consider themselves politically active. 
+
+```{r pearson_chi-square_t2}
+
+chisq.test(t2)
+
+```
+
+### Running Fisher's Exact Test
+
+Given a small overall sample size, the `fisher.test` was also conducted.
+
+```{r fisher_exact_for_t2}
+
+fisher.test(t2)
+
+```
+
+Based on both the chi-square test and the fisher exact test, we come to the conclusion that there is no statistically significant association between political identity and political activism. In both cases, when conducted under the 90% confidence level, the p-values were larger than 0.1.
+
+### Checking Assumptions - The Cochran Conditions:
+
+The Cochran Conditions state that there should be:
+
+- no cells with 0 counts
+- at least 80% of the cells in our table with counts of 5 or higher
+
+We meet both conditions. However, since the number of observations are so small in each cell, both the Chi-Square and the Fisher's exact Test may not be appropriate for our analysis.
+
+### An Association Plot:
+
+Below is the association plot for our 2x3 table. We can see that the independence model works fairly well for those who consider themselves "Liberal". But the independence model doesn't work well for the other two groups. 
+
+```{r assoc_plot_t2, fig.height = 6}
+
+assoc(t2)
+
+```
+
+# Analysis 6: Three-Way Contingency Table:
+
+Now we will take a look at the association of `checkup_018` and `female_003` stratified by `newHealth`. Each of the three variables is categorical, and `checkup_018` and `female_003` have two levels, while `newHealth` has three. We are interested to see if our results from Analysis 4 change after  stratifying on a new variable `newHealth`. 
+
+## Compiling the Three-Way Contingency Table:
+
+Below is our 2x2 table from Analysis 4, split up into 3 tables by our new variable `newHealth`. 
+
+```{r three-way_table}
+
+t4 <- table(sur2018$female_003, sur2018$checkup_018, sur2018$newhealth)
+
+colnames(t4) <- c("Had a Checkup", "No Checkup" )
+rownames(t4) <- c("Female", "Male")
+addmargins(t4)
+
+```
+
+### Flattening the Table:
+
+It would be more useful to flatten the tables. This is shown below. 
+
+```{r flattened_three-way_table}
+
+t4.flat <- table(sur2018$newhealth, sur2018$female_003, sur2018$checkup_018 )
+
+dimnames(t4.flat)[[1]] <- c("Good/Fair", "Very Good","Excellent"  )
+dimnames(t4.flat)[[2]] <- c("Female", "Male") 
+dimnames(t4.flat)[[3]] <- c("Had a Checkup", "No Checkup") 
+ftable(t4.flat)
+
+```
+
+## Checking Assumptions with the Woolf Test:
+
+We'll begin by checking the assumptions of the Cochran-Mantel-Haenszel test for our original table, `t4`. The Woolf test will test to see if the assumption of equal population odds ratios within each stratum is violated. 
+
+```{r woolf_test_for_interaction}
+
+woolf_test(t4)
+
+```
+
+We cannot reject the null hypothesis. Therefore there isn't enough evidence to reject that the odds ratios are homogeneous across the three strata. However, it must be noted that we have very small counts in plenty of cells. Due to this, the following CMH test will likely not be as accurate as we might like. 
+
+## The Cochran-Mantel-Haenzel Test:
+
+The CMH test below assesses whether the odds ratio between `checkup_018` and `female_003` is significantly different from 1, after stratifying by the three `newHealth` groups. The assumptions for the CMH test were fulfilled by the previous step with the Woolf test.
+
+```{r CMH_table_t4}
+
+mantelhaen.test(t4, conf.level = .90)
+
+```
+
+The common population odds ratio comparing the scores of `checkup_018` among females and males is 0.95 (90% CI 0.37, 2.46). Since this CI contains 1, we conclude that there is no statistically significant association between `checkup_018` and `female_003` after accounting for `newHealth`. 

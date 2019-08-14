@@ -1,0 +1,575 @@
+---
+title: "PQHS 431 Project - Wu"
+author: "Joshua Wu"
+date: "December 13th, 2018"
+output:
+  rmdformats::readthedown:
+    highlight: kate
+    number_sections: true
+    code_folding: show
+    df_print: paged
+---
+# Environment Set-up:
+
+Below are the various packages that were imported to conduct this project.
+
+```{r initial_setup, cache=FALSE, message = FALSE, warning = FALSE}
+# source("Love-boost.R")
+# library(Hmisc); library(Epi); library(vcd)
+library(knitr); library(rmdformats); library(rmarkdown)
+library(simputation); library(skimr); library(magrittr)
+library(broom); library(GGally); library(car)
+library(tidyverse) 
+## Global options
+options(max.print="75")
+opts_chunk$set(comment=NA,
+               message=FALSE,
+               warning=FALSE)
+opts_knit$set(width=75)
+## Skim options (leave out histograms)
+skimr::skim_with(numeric = list(hist = NULL),
+                 integer = list(hist = NULL))
+```
+
+# Import Dataset: 
+
+Below are the steps that imported the dataset and converted all column names to Upper-Case.
+
+```{r Import Dataset and set all Column names to Uppercase}
+
+load('C:/Users/jwu41/Desktop/School/AU2018/PQHS 431/Project/NSDUH_2016.RData')
+
+```
+
+```{r Converting all Column Names to UpperCase}
+
+for( i in 1:ncol(PUF2016_022818))
+  {
+   colnames(PUF2016_022818)[i] <- toupper(colnames(PUF2016_022818)[i])
+  }
+
+```
+
+# Cleaning the Dataset:
+
+## Merging all Alcohol Consumption Variables Into One:
+
+Due to the nature of how this question was asked, respondents only answered one of the consumption time frames depending on which they were most comfortable with. To prevent working on multiple datasets, we merged all the variables into the "year" time frame. Days of Alcohol consumption per week were multiplied by 52 and Days of Alcohol Consumption per Month were multiplied by 12. First we  subset the dataset by their respective time intervals and create new variables to conform with the "year" time frame. We then rbind all three datasets into one, since they all have the same variable names and same number of variables.
+
+```{r Changing Alcohol variables from ALDAYPWK and ALDAYPMO to ALDAYPYR}
+
+nsduh2016 <- PUF2016_022818
+
+nsduh2016 <- nsduh2016 %>% 
+    mutate(newALYR = ALDAYPYR)
+nsduh2016 <- nsduh2016 %>% 
+    mutate(newALMO = ALDAYPMO)
+nsduh2016 <- nsduh2016 %>% 
+    mutate(newALWK = ALDAYPWK)
+
+nsduh2016$newALYR <- as.numeric(nsduh2016$newALYR)
+nsduh2016$newALMO <- as.numeric(nsduh2016$newALMO)
+nsduh2016$newALWK <- as.numeric(nsduh2016$newALWK)
+
+nsduh2016YEAR <- subset(nsduh2016, newALYR >= 1 & newALYR <= 365)
+nsduh2016MO <- subset(nsduh2016, newALMO >= 1 & newALMO <= 31)
+nsduh2016WEEK <- subset(nsduh2016, newALWK >= 1 & newALWK <= 7)
+
+nsduh2016WEEK$Alcohol <- nsduh2016WEEK$newALWK*52
+nsduh2016MO$Alcohol <- nsduh2016MO$newALMO*12
+nsduh2016YEAR$Alcohol <- nsduh2016YEAR$newALYR
+
+nsduh2016_temp <- rbind(nsduh2016WEEK, nsduh2016MO, nsduh2016YEAR)
+nsduh2016_temp <- nsduh2016_temp %>%
+  select(Alcohol, IRSEX, IREDUHIGHST2, ADWRDST, ADWRAGE)
+
+summary(nsduh2016_temp)
+
+
+```
+
+## Collapsing Categories for Education:
+
+The Education Levels (`IREDUHIGHST2`) were collapsed due to low counts if the variable was left as is. All Education levels up to Not Completing High School were combined into one group "Did Not Complete High School". All other Education levels were left as they were originally for a total of 5 groups (Did not complete high school, high school, did not complete college, associate's degree, and bachelor's and up) were created for the new variable `newEdu`.
+
+```{r Collapsing Education Categories}
+
+nsduh2016_temp$IREDUHIGHST2 <- as.character(nsduh2016_temp$IREDUHIGHST2)
+
+
+nsduh2016_temp <- nsduh2016_temp %>%
+    mutate(newEdu = fct_recode(IREDUHIGHST2, 
+                                 "DNCHS" = "1",
+                                 "DNCHS" = "2",
+                                 "DNCHS" = "3",
+                                 "DNCHS" = "4",
+                                 "DNCHS" = "5",
+                                 "DNCHS" = "6",
+                                 "DNCHS" = "7",
+                                 "HS" = "8",
+                                 "DNCC" = "9",
+                                 "AD" = "10",
+                                 "BAU" = "11"))
+
+nsduh2016_temp %>% count(IREDUHIGHST2, newEdu)
+
+nsduh2016_temp$newEdu <- as.factor(nsduh2016_temp$newEdu)
+
+```
+
+## Subset the Data further to only contain those who responded to "Age when worst period of time started" and "Severity of Emotional Distress during the last two weeks":
+
+These two variables were quantitative variables. In the codebook however, they did not only contain the valid responses; there were others such as: DONT KNOW, REFUSED, BLANK, and LEGITIMATE SKIP. These variables were removed from the `nsduh2016_temp` dataset.
+
+```{r Subset the data further to only contain Those who responded to both ADWRAGE and ADWRST}
+
+nsduh2016_temp$ADWRDST <- as.character(nsduh2016_temp$ADWRDST)
+nsduh2016_temp$ADWRAGE <- as.character(nsduh2016_temp$ADWRAGE)
+
+
+nsduh2016_temp <- subset(nsduh2016_temp, !(ADWRAGE %in% c("985","994","997","998","999")))
+nsduh2016_temp <- subset(nsduh2016_temp, !(ADWRDST %in% c("94","97","98","99")))
+
+nsduh2016_temp$ADWRAGE <- as.numeric(nsduh2016_temp$ADWRAGE)
+
+summary(nsduh2016_temp)
+
+```
+
+## Changing ADWRDST (Severity of Emotional Stress) from character to factor and Recategorization of IRSEX:
+
+A new variable was created to make Severity of Emotional Stress more easily understood. The same was done for Sex of the respondent.
+
+```{r Readjusting ADWRDST categories}
+
+nsduh2016_temp$ADWRDST <- as.character(nsduh2016_temp$ADWRDST)
+
+nsduh2016_temp <- nsduh2016_temp %>%
+    mutate(Severity = fct_recode(ADWRDST, 
+                                 "Mild" = "1",
+                                 "Moderate" = "2",
+                                 "Severe" = "3",
+                                 "Very Severe" = "4"))
+
+nsduh2016_temp %>% count(ADWRDST, Severity)
+
+nsduh2016_temp$Severity <- as.factor(nsduh2016_temp$Severity)
+
+```
+
+```{r Readjusting IRSEX categories}
+
+nsduh2016_temp$IRSEX <- as.character(nsduh2016_temp$IRSEX)
+
+nsduh2016_temp <- nsduh2016_temp %>%
+    mutate(Sex = fct_recode(IRSEX, 
+                                 "Male" = "1",
+                                 "Female" = "2"))
+
+nsduh2016_temp %>% count(Sex, IRSEX)
+
+nsduh2016_temp$Sex <- as.factor(nsduh2016_temp$Sex)
+
+```
+
+## Cleaning Up the Data for our final Dataset:
+
+The final dataset will contain `Alcohol`, `Sex`, `newEdu`, `ADWRAGE`, and `Severity`.
+
+```{r Making Sure Week only has ALDAYPWK and Month only has ALDAYPMO, etc.}
+
+nsduh2016_final <- nsduh2016_temp %>%
+  select (Alcohol, Sex, newEdu, ADWRAGE, Severity)
+
+summary(nsduh2016_final)
+
+```
+
+## Creation of Subj_Id:
+
+Subj_ID was created to simplify the process creating the training and test samples. 
+
+```{r Create ID per row}
+
+nsduh2016_final <- tibble::rowid_to_column(nsduh2016_final, "subj_id")
+
+nsduh2016_final
+
+```
+
+```{r Convert subj ID to character}
+
+nsduh2016_final$subj_id <- as.character(nsduh2016_final$"subj_id")
+
+nsduh2016_final
+
+```
+
+
+# Codebook for Final Test Table:
+
+The final dataset will contain 5 variables.
+*`Alcohol` observations that are greater than 365 originated from multiplication of either the days per month or days per week drinking response variables. For example, if someone drank 31 days a month, to convert that to days per year would result in 372, or 31x12. 
+
+Variable      | Type  | Description / Levels
+--------- | :---: | --------------------------------------------
+`subj_id`     | Chara | Subject ID's based on the Row Observation Number
+`Alcohol`     | Quant | Within the last 12 months, How many days per week have you drank Alcohol (1-372*)
+`Sex`         | Cat-2 | Sex of the Respondent (M/F)
+`newEDU`      | Cat-5 | Education Level of the Respondent (Did not Complete HS, Graduated HS, Did not complete College, Associate's Degree, Bachelor's Degree and Above)
+`ADWRAGE`     | Quant | Age when worst period of time started
+`Severity`    | Cat-4 | During the last two weeks, how severe was Emotional Stress (Mild/Moderate/Severe/Very Severe)
+
+# Step 1. Dealing with Missing Values:
+
+First, we will check if there are any missing values in any observations. 
+
+```{r count_NAs_by_variable}
+
+colSums(is.na(nsduh2016_final))
+
+```
+
+As seen above, there are no observations with missing values. No Imputation or Deletion necessary.
+
+# Step 2. Identify Training and Test Samples
+
+The following code creates the training and testing datasets in a 70/30 split for `NSDUH2016_final`. The training and testing datasets will be called `sp2_training` and `sp2_test` respectively.
+
+```{r Creating two seeds and creating two sample datasets}
+
+set.seed(431001)
+
+sp2_training <- nsduh2016_final %>% sample_frac(.75)
+sp2_test <- anti_join(nsduh2016_final, sp2_training, by = "subj_id")
+
+dim(sp2_training)
+dim(sp2_test)
+
+```
+
+# Step 3. Summarize the Outcome and the Predictors:
+
+## Visualizing the Outcome Distribution:
+
+Looking at the Histograms and QQ-Plots below, it is clear that our outcome data is not Normal; There appears to be a right skew. 
+
+```{r Histogram of outcome variable for all Three training samples}
+
+bw <- 2 * IQR(sp2_training$Alcohol) / length(sp2_training$Alcohol)^(1/3)
+hist3 <- ggplot(data = sp2_training, aes(x = Alcohol)) + geom_histogram(binwidth = bw, color  = "white", fill = "red")+labs(title = "Histogram of Days Alcohol Consumed per Year with Right Skew", x = "Days with Alcohol Consumption", y = "Frequency")
+
+hist3
+
+```
+
+```{r QQ plot of each dataset}
+
+y <- quantile(sp2_training$Alcohol, c(0.25, 0.75))
+x <- qnorm(c(0.25, 0.75))
+slope <- diff(y)/diff(x)
+int <- y[1L] - slope*x[1L]
+
+qq3 <- ggplot(sp2_training, aes(sample = Alcohol)) + geom_point(stat = "qq") + theme_bw() + labs(title = "Normal QQ Plot for Days of Alcohol Consumed Per Year (Not Normal)", subtitle = "with line drawn through 25th, 75th percentiles") + geom_qq(alpha = 0.5) + geom_abline(slope = slope, intercept = int, col = "red")
+
+qq3
+
+```
+
+## Numerical Summary of Outcome:
+
+Using Numerical Summaries as well, we can see that there are differences between the means and medians of our outcome variables. The summaries also indicate that there is a right skew in our data. 
+
+```{r Numerical Summary of each Alcohol outcome}
+
+mosaic::favstats(~Alcohol, data = sp2_training)
+
+```
+
+## Numerical Summary of the Predictors:
+
+As previously checked, there are no missing data from any of the predictors. There are three categorical predictors and one quantitative predictor. 
+
+```{r, paged.print = FALSE}
+
+sp2_training %>% select(Sex, newEdu, ADWRAGE, Severity) %>% skim()
+
+```
+
+# Step 4. Scatterplot Matrix and Transformation Checking:
+
+## Scatterplot Matrix:
+
+Below are scatterplots matrices of the main outcome variable with two matrices. The first matrix contains the predictors `Sex` and `Severity`, and the second matrix contains the predictors `ADWRAGE` and `newEdu`. If we look at `Alcohol` against the predictors, it would seem that there are differences in Alcohol consumption by `Sex`, but not so much for `Severity`. There seems to be a low correlation between `ADWRAGE` and `Alcohol`. Like with `Severity`, there do not seem to be much difference in Alcohol consumption by `newEdu`. 
+
+```{r, message = FALSE}
+
+sp2_training %>% 
+  select(Alcohol, Sex, Severity) %>% 
+  ggpairs(., title = "Scatterplot Matrix for Alcohol Days per Year (1)",
+          lower = list(combo = wrap("facethist", bins = 20)))
+
+sp2_training %>% 
+  select(Alcohol, ADWRAGE, newEdu) %>% 
+  ggpairs(., title = "Scatterplot Matrix for Alcohol Days per Year (2)",
+          lower = list(combo = wrap("facethist", bins = 20)))
+
+```
+
+## Collinearity Checking:
+
+None of the predictors show any substantial collinearity. None of the Generalized VIF exceed 5, at which point we would have concerns. As shown below, none of the GVIF's exceed 1.05. 
+
+```{r model creation and running of VIF}
+
+model1 <- lm(Alcohol~Sex + Severity + newEdu + ADWRAGE, data = sp2_training)
+
+vif(model1)
+
+```
+
+## `boxCox` function to assess need for transformation of our outcome:
+
+From the results shown below, our transformation parameters seem to be closest to 0. Therefore, we will be conducting a log-transformation. 
+
+```{r boxCox_plot}
+
+boxCox(model1)
+
+powerTransform(model1)
+
+```
+
+```{r Creating new models that Utilize the transformations}
+
+model1_tf <- lm(log(Alcohol) ~ Sex + Severity + newEdu + ADWRAGE, data = sp2_training)
+
+```
+
+# Step 5. Kitchen Sink Model Assessment:
+
+Below is the Kitchen Sink Linear Regression Model. Our Kitchen sink models have already been created after the transformations in the previous step.
+
+## Summarizing the Kitchen Sink model:
+
+```{r kitchen_sink}
+
+summary(model1_tf)
+
+```
+
+## Interpreting the Model Summary:
+
+Our `model1_tf` model accounts for 3.1% of the variation in `Alcohol`. The Multiple R-squared and their adjusted counterparts are not too different, suggesting no major problems with collinearity. 
+
+In terms of Residual standard errors, 95% of our training sample subjects in this training sample should be within e^(1.5) or 4.5 days of the actual value for `Alcohol`
+
+The ANOVA F-test p-value for the outcome indicates that a highly statistically significant amount of predictive value is accounted for by the model.
+
+```{r}
+
+glance(model1_tf)
+
+```
+
+## Effect Sizes: Interpreting Coefficient Estimates:
+
+Our model for `model1_tf` is: 3.718 - 0.360 Female + 0.024 SevModerate - 0.022 SevSevere -0.082 SevVerySevere + 0.194 newEduAD + 0.524 newEduBAU + 0.0596 newEduHS +0.169 newEduDNCC - 0.002 ADWRAGE.
+
+This implies that holding all things constant, for every one year increase in Age When Worst Period of Time Started `ADWRAGE`, we anticipate a 0.23% decrease in Days in which Alcohol is Consumed per Year `Alcohol` (90% Confidence Interval -0.54%, 0.9%). If we had two subjects who had the same values for all other predictors, but 'A' had their most severe mental health issue at 18 years old and the 'B' had it at 38 years old, our model predicts that subject 'B' will have 4.6% (-4.92%, -4.28%) less days of drinking per year than 'A'. 
+
+For our training sample, we predict that ( * significant @ alpha = 0.1, all CI at 0.90 confidence level)...
+- subjects who are female drink 30.2% (-35.3, -24.8) less Alcohol per Year.*
+- subjects with moderate severity of emotional stress within the last two weeks drink 2.5% (-12.2%, 19.6%) more alcohol per year than those with mild severity of emotional stress. 
+- subjects with severe severity of emotional stress within the last two weeks drink 2.3% (-16.3%, 14.2%) less alcohol per year than those with mild severity of emotional stress. 
+- subjects with very severe severity of emotional stress within the last two weeks drink 8.2% (-22.1%, 9.1%) less alcohol per year than those with mild severity of emotional stress. 
+- subjects who have completed an associate's degree drink 21.4% (2.0%,44.4%) more alcohol than subjects who did not complete high school.*
+- subjects who have completed an Bachelor's and Up drink 68.9% (45.7%,95.9%) more alcohol than subjects who did not complete high school.*
+- subjects who have completed high school drink 6.1% (-9.1%,23.8%) more alcohol than subjects who did not complete high school.
+- subjects who did not complete college drink 18.4% (2.1%,37.2%) more alcohol than subjects who did not complete high school***.
+
+```{r effect_sizes}
+
+tidy(model1_tf, conf.int = TRUE, conf.level = 0.9)
+
+```
+
+## Does collinearity in the kitchen sink model have a meaningful impact?:
+
+No GVIF is above 5, therefore, no reason of concern from collinearity.
+
+```{r kitchen_sink_vif_for_collinearity}
+
+car::vif(model1_tf)
+
+```
+
+# Step 6. Build a Second, Smaller Linear Model:
+
+## Backwards Stepwise Elimination:
+
+Backwards selection recommends that we only have `Sex` and `newEdu` retained in our model. 
+
+```{r Stepwise Regression Elimination}
+
+step(model1_tf)
+
+```
+
+## Fitting the "small" model:
+
+Below is a summary of our new "small" model.
+
+```{r fit_mod_small}
+
+modelsmall <- lm(log(Alcohol)~Sex+newEdu, data = sp2_training)
+summary(modelsmall)
+
+```
+
+# Step 7. Compare the Kitchen Sink and Second Models in the Training Samples:
+
+Using Residual Standard Error, AIC, BIC, and Adjusted R^2, we will compare our two models `model1_tf` and `modelsmall`. 
+
+## Comparing models in the training set:
+
+The smaller model has smaller AIC and BIC. The residual standard error and adjusted r squared are essentially the same for the two models. It would appear that the smaller model performs better in the training sample. 
+
+```{r}
+
+temp_a <- glance(model1_tf) %>% 
+  select(-logLik, -deviance) %>%
+  round(digits = 3) %>%
+  mutate(modelname = "kitchen sink")
+temp_b <- glance(modelsmall) %>%
+  select(-logLik, -deviance) %>%
+  round(digits = 3) %>%
+  mutate(modelname = "smaller model")
+training_comp <- bind_rows(temp_a, temp_b) %>%
+  select(modelname, df, AIC, BIC, everything())
+
+```
+
+```{r}
+
+training_comp
+
+```
+
+# Step 8. Use the Two Models to predict the outcome in the Test Samples:
+
+## Calculating the Prediction Errors:
+
+The first model is the kitchen sink model. The second model is the smaller model. 
+
+### Kitchen Sink Model:
+
+```{r}
+
+test_ksink <- augment(model1_tf, newdata = sp2_test) %>% 
+  mutate(modelname = "kitchen sink", 
+         .resid = Alcohol - exp(.fitted), .expfit = exp(.fitted)) %>%
+  select(subj_id, modelname, Alcohol, .fitted, .resid, 
+         Sex, newEdu, ADWRAGE, Severity, 
+         everything())
+head(test_ksink,3)
+
+```
+
+### Smaller Model:
+
+```{r}
+
+test_small <- augment(modelsmall, newdata = sp2_test) %>% 
+  mutate(modelname = "small model", 
+         .resid = Alcohol - exp(.fitted), .expfit = exp(.fitted)) %>%
+  select(subj_id, modelname, Alcohol, .fitted, .resid, 
+         Sex, newEdu, ADWRAGE, Severity, 
+         everything())
+head(test_small,3)
+
+```
+
+### Combine test sample results from the two models:
+
+```{r Combining test sample results from two models}
+
+test_comp <- union(test_ksink, test_small) %>%
+  arrange(subj_id, modelname)
+test_comp
+
+```
+
+## Visualize the prediction errors:
+
+From the visualization below, the distributions of errors for both linear models seem similar. The visualization indicates a right-skew of the distribution of the errors.
+
+```{r Boxplot/Violin Plot of Prediction Errors}
+
+ggplot(test_comp, aes(x = "", y = .resid)) +
+   geom_violin(fill = "dodgerblue", alpha = 0.25) + 
+  geom_boxplot(fill = "dodgerblue", col = "navy", width = 0.25) + coord_flip() + labs(x = "") + 
+  facet_grid (modelname ~ .) + labs(title = "Distribution of the Errors by Linear Model")
+
+```
+
+## Form the table comparing the model predictions:
+
+Below are the Mean Square Prediction Error and the Mean Absolute Prediction Error for both `model1_tf` and `modelsmall`. It would seem that `model1_tf` has a slightly lower MAPE, but `modelsmall` has slightly lower MSPE. `model1_tf` has lower max_error as well. 
+
+```{r Comparing MAPE, MSPE, and Max_Error}
+
+test_comp %>%
+  group_by(modelname) %>%
+  summarize(n = n(),
+            MAPE = mean(abs(.resid)), 
+            MSPE = mean(.resid^2),
+            max_error = max(abs(.resid)))
+
+```
+
+## Identify the largest errors:
+
+The largest error in the kitchen sink model was in subject 3385, with an observed value of Alcohol of 372. The model fitted value was 28.9 (The value of `.expfit`). The largest error in the small model was also subject 3385, with an observed value of Alcohol of 372. The model fitted value was 28.4 (also the value of `.expfit`). As seen below, the same subject was most poorly fit by each model. 
+
+```{r Find observation with most amount of error from the fitted model}
+
+temp1 <- test_ksink %>%
+  filter(abs(.resid) == max(abs(.resid)))
+temp2 <- test_small %>%
+  filter(abs(.resid) == max(abs(.resid)))
+bind_rows(temp1, temp2)
+
+```
+
+# Step 9. Select the better model and apply it to the entire data set:
+
+There does not seem to be a significant difference between the two models. I will therefore select the kitchen sink model, since it contains the predictors of interest for my research question. 
+
+```{r ANOVA of the two linear models}
+
+anova(model1_tf, modelsmall)
+
+```
+
+## Fitting the Chosen Model to the Complete Data:
+
+Below, we fit the kitchen sink model for the complete dataset `nsduh2016_final`, a dataset of only people who answered the alcohol consumption questions of "Days of Alcohol" per Week, Month, and Year. Under the 90% confidence interval, controlling for all other variables, it appears that Age when the worst period of time started is statistically significant. This was not the result in the training data. It also appears that Sex of the respondent is also statistically significant and no severity group was statistically different from all other groups. It was found that at 90% significance, those with Associate's Degrees, Bachelor's and Higher and those who had college education but did not complete it had significantly different alcohol consumption rates than those who did not complete high school. These results are the same in the training sample. There were differences in signs of coefficients of the linear models however. The signs for `SeveritySevere` and `newEDUHS` changed. The R^2 and adjusted R^2 for the two models are different by about 4%. The residual standard errors are very similar between the two models. 
+
+```{r ksink_for_full_data_set}
+
+model_final <- lm(log(Alcohol) ~  Sex + newEdu + ADWRAGE + Severity, data = nsduh2016_final)
+summary(model_final)
+
+```
+
+## Residual Plots for the Chosen Model in the Complete Data:
+
+Unfortunately, we see violations of regression assumptions. We see a "Fan" pattern of our Residuals vs Fitted plot which might indicate non-Linearity. In addition to that, the Normal Q-Q plot shows that we have violated the normality assumption. 
+
+```{r residual_plots_final_model}
+
+par(mfrow = c(1,2))
+plot(model_final, which = 1:2)
+
+```
