@@ -1,0 +1,533 @@
+---
+title: "Survival Analyses of German Leukemia Patients"
+author: "Devlin Moyer and Joshua Wu"
+date: "`r Sys.Date()`"
+output:
+  rmdformats::readthedown:
+    highlight: kate
+    number_sections: true
+    code_folding: show
+    df_print: paged
+---
+
+# R Setup and Data Load
+
+```{r setup, message=FALSE}
+knitr::opts_chunk$set(echo = TRUE, comment = NA)
+
+library(readxl)
+library(survival)
+library(survminer)
+library(lars)
+library(broom)
+library(rms)
+library(tidyverse)
+```
+
+```{r read_data}
+AML_CMML_clinicals <- read_xlsx("AML_CMML_cohortids.xlsx", sheet = "clinical data") 
+MDS_clinicals_1 <- read_xlsx("clinicalmetadata.xlsx", sheet = "Tabelle1") 
+MDS_clinicals_2 <- read_xlsx("clinicalmetadata.xlsx", sheet = "clinical data") 
+MDS_MPN_clinicals <- read_xlsx("Copy of Data_status_MDS-MPN_clinical data_20181023.xlsx", sheet = "Clinical Data")
+small_mutations <- read.csv("mutations1.csv") # point mutations and small indels
+deletions <- read.csv("mutations2.csv") # large deletions
+all_WGS_samples <- read.csv("mutations3.csv", stringsAsFactors = FALSE) # all samples that got sequenced
+raw_expression_data <- read.delim("2019_03_01_expression.txt", header = TRUE)
+```
+
+# Data Tidying
+
+The variables we are interested in are the following:
+
+  - Type of leukemia (referred to as mkh in the raw data)
+  - Type of treatment 
+  - Binary Indicators of mutations in SF3B1, SRSF2, and U2AF1
+  - Expression of DDX41, LUC7L2, PRPF8, and ZRSR2
+  - Survival (our outcome)
+  
+There are several things we need to do to tidy the data:
+
+  - Clean up the therapy columns: there are a lot of typos and inconsistencies in that column. Most of it is also in German.
+    + Some patients received bone marrow transplants, and whatever is recorded in their therapy columns should be replaced with "bone marrow transplant"
+    + Many of the things written in the therapy column are essentially synonymous with "no therapy" or "therapy unknown", so we have to carefully pick those out
+    + A relatively small proportion of patients received custom drug cocktails, while most patients received a single drug. We will not be able to use these patients' therapies to predict survival, as they are the only ones who received that therapy.
+  - Recode mutations: we currently have information on every single mutation present in each patient sample, and we are only interested in knowing whether each patient has or doesn't have a mutation in one of a few splicing factors.
+    + The mutation_info file currently has one row per mutation instead of one row per sample, so that is also something to address
+    + Large-scale deletions were recorded in a separate file from small indels and point mutations, so that information has to be joined in.
+  - Subset the expression data; the raw data file has expression data for a very large number of genes, and we only want it for four genes
+    + It also needs to be transposed, since the columns are sample IDs and the rows are genes in the raw data file
+
+## Clinical Data
+
+### Merge Clinical Data
+
+We start by reducing the number of columns we have to work with in each dataframe.
+
+```{r clinical_subset}
+AML_CMML_clinical_subset <- AML_CMML_clinicals %>%
+  select(array_id, mkh, `Death=1`, "Overall Survival (in days)",
+         Therapy1, Therapy2, Therapy3, Therapy4, Therapy5, "allo SCT", "auto SCT")
+
+# clinical info for MDS patients came in two files, so they have to be merged first
+MDS_clinical_subset_1 <- MDS_clinicals_1 %>%
+  select(ID, MKH, "MLL Lab ID")
+MDS_clinical_subset_2 <- MDS_clinicals_2 %>%
+  select("Exam No", Death, "Overall Survival", "Clid Therapie1", "Clid Therapie2",
+         "Clid Therapie3", "Clid Therapie4", "Clid Therapie5", "allo SCT")
+MDS_clinical_subset <- merge(MDS_clinical_subset_1, MDS_clinical_subset_2, by.x = "MLL Lab ID", by.y = "Exam No")
+
+# now we can drop the MLL Lab ID
+MDS_clinical_subset$`MLL Lab ID` <- NULL
+
+MDS_MPN_clinical_subset <- MDS_MPN_clinicals %>%
+  select("MLL ID", "MKH?", `Death=1`, "Overall Survival (in days)",
+         Therapy1, Therapy2, Therapy3, Therapy4, Therapy5, "auto SCT", "allo SCT")
+```
+
+None of the MDS patients have autologous stem cell transplants (auto SCT), but four of the AML / CMML patients do, which means that there is an extra column in the AML / CMML dataframe that is preventing us from merging it with the MDS dataframe. We are only interested in whether or not each patient got a bone marrow transplant, not which kind of transplant they got, so we will merge the two columns together in the AML / CMML data to get a binary "bone marrow transplant" column.
+
+```{r merge_SCTs}
+MDS_MPN_clinical_subset %>%
+  filter(`auto SCT` == 1 | `allo SCT` == 1) %>%
+  select(`allo SCT`, `auto SCT`) %>%
+  knitr::kable()
+
+AML_CMML_clinicals_bmt <- AML_CMML_clinical_subset %>%
+  mutate(bmt = ifelse(`allo SCT` == 1 || `auto SCT` == 1, 1, 0))
+AML_CMML_clinicals_bmt$`allo SCT` <- AML_CMML_clinicals_bmt$`auto SCT` <- NULL
+
+MDS_MPN_clinicals_bmt <- MDS_MPN_clinical_subset %>%
+  mutate(bmt = ifelse(`allo SCT` == 1 || `auto SCT` == 1, 1, 0))
+MDS_MPN_clinicals_bmt$`allo SCT` <- MDS_MPN_clinicals_bmt$`auto SCT` <- NULL
+```
+
+Now we can merge the MDS, AML, and CMML clinical data into a single dataframe.
+
+```{r merge_clinical}
+# get consistent column names then rbind
+colnames(AML_CMML_clinicals_bmt) <- c("sample_id", "leuk_type", "death", "survival",
+                                      "therapy1", "therapy2", "therapy3", "therapy4", "therapy5", "bmt")
+colnames(MDS_clinical_subset) <- c("sample_id", "leuk_type", "death", "survival",
+                                   "therapy1", "therapy2", "therapy3", "therapy4", "therapy5", "bmt")
+colnames(MDS_MPN_clinicals_bmt) <- c("sample_id", "leuk_type", "death", "survival",
+                                     "therapy1", "therapy2", "therapy3", "therapy4", "therapy5", "bmt")
+all_clinicals <- bind_rows(AML_CMML_clinicals_bmt, MDS_clinical_subset, MDS_MPN_clinicals_bmt)
+```
+
+### Tidy Leukemia Types
+
+For our purposes, we are going to consider samples with s-AML (secondary AML) and samples with primary AML as having the same type of leukemia.
+
+```{r merge_sAML_with_AML}
+all_clinicals <- all_clinicals %>%
+  mutate(leuk_type = ifelse(leuk_type == "s-AML", "AML", leuk_type))
+```
+
+MLL included two samples with MPN, which is not a type of leukemia we are studying at the moment.
+
+```{r drop_MPNs}
+all_clinicals <- all_clinicals %>%
+  filter(leuk_type != "MPN")
+```
+
+### Tidy Therapy Column
+
+As we mentioned above, the therapy column is a nightmarish mixture of spelling errors, mixed German and English, and all sorts of other inconsistencies. We are going to eventually make one column for each kind of therapy and give each patient a 1 or 0 indicating whether or not they ever received that drug. This ignores several details about the therapies (how many different ones, in what order, what dosage) but we just do not have that information available to us, so we are going to do the best we can.
+
+### Concatenate Therapy Columns
+
+```{r concat_therapies}
+concat_therapy <- all_clinicals %>%
+  mutate(therapy = paste(therapy1, therapy2, therapy3, therapy4, therapy5, sep = " ")) %>%
+  select(-therapy1, -therapy2, -therapy3, -therapy4, -therapy5)
+```
+
+Now we create a column for every drug name that has a 1 or 0 in it.
+
+```{r condense_drug_names}
+clean_therapy <- concat_therapy %>%
+  mutate(therapy = case_when(
+    grepl("\\+", therapy) ~ NA_character_,
+    grepl("decitabin(e)?", therapy, ignore.case = TRUE) ~ "decitabine",
+    grepl("(SorAML|sorafenib)", therapy, ignore.case = TRUE) ~ "sorafenib",
+    grepl("(DA|daunorubicin)", therapy, ignore.case = TRUE) ~ "daunorubicin",
+    grepl("aza(c|z)(y|i)ti(d|f)in(e)?", therapy, ignore.case = TRUE) ~ "azacytidine",
+    grepl("hydroxycarbamid(e)?", therapy, ignore.case = TRUE) ~ "hydroxycarbamide",
+    grepl("(HU|Syrea|hydroxyurea)", therapy, ignore.case = TRUE) ~ "hydroxyurea",
+    grepl("(cy(t)+ara(b)?in(e)?|OSHO|ARA-C)", therapy, ignore.case = TRUE) ~ "cytarabine",
+    grepl("(lenal(i)?domid|revlimid)", therapy, ignore.case = TRUE) ~ "lenalidomide",
+    grepl("(EPO|erythropo(i)?etin)", therapy, ignore.case = TRUE) ~ "erythropoietin",
+    grepl("mitoxantron(e)?", therapy, ignore.case = TRUE) ~ "mitoxantrone",
+    grepl("fludarabin(e)?", therapy, ignore.case = TRUE) ~ "fludarabine",
+    grepl("(idarubicin|IDA)", therapy, ignore.case = TRUE) ~ "idarubicin",
+    grepl("atra", therapy, ignore.case = TRUE) ~ "ATRA",
+    grepl("(methotrexate|MTX)", therapy, ignore.case = TRUE) ~ "methotrexate",
+    grepl("amsacrin(e)?", therapy, ignore.case = TRUE) ~ "amsacrine",
+    grepl("ATG", therapy, ignore.case = TRUE) ~ "ATG",
+    grepl("allo(\\.)\ SCT", therapy, ignore.case = TRUE) ~ "BMT",
+    # need to make sure these lines don't include the word "ohne" (without)
+    grepl("(busulf(an|ex)|myleran)", therapy, ignore.case = TRUE) && !grepl("ohne") ~ "busulfan",
+    grepl("thioguanin(e)?", therapy, ignore.case = TRUE) && !grepl("ohne") ~ "thioguanine"
+  )) %>%
+  # if someone got a transplant that overrides whatever drugs they got beforehand for purposes of survival prediction
+  mutate(therapy = ifelse(bmt == 1, "bmt", therapy)) %>%
+  # now we don't need the bmt column anymore
+  select(-bmt)
+```
+
+## Mutation Data
+
+### Merge Mutation Data
+
+Point mutations and small insertions and deletions were recorded in `small_mutations` while large-scale deletions (e.g. large chunks of chromosomes' arms) were recorded in `deletions`. In order to merge these two datasets, we will need to add a "mutation" column to the deletion data; we will just make every row's entry for "mutation" say "deletion".
+
+```{r merge_mutation}
+deletions$mutation <- "deletion"
+colnames(deletions) <- c("sample_id", "gene", "mutation")
+full_mutation_info <- rbind(small_mutations, deletions)
+```
+
+### Condense Mutations
+
+We need to do several things to clean this up:
+
+- Split U2AF1 mutations into three groups using `HGVSp`: those with mutations at Ser34, Gln157, and elsewhere.
+    + Previous studies have shown that patients with mutations at Ser34 and Gln 157 have very different characteristics.
+- Identify all the genes that have at least 20 samples with a mutation in that gene (we are probably not going to find anything significant when comparing groups of less than 20, since we will also be subdividing by other clinical variables) and make one column for each of those genes with a 1 or 0 indicating whether each sample has a mutation in that gene.
+
+```{r clean_mutation}
+# then collapse all the non-splicing factor genes together
+cleaned_mutations <- full_mutation_info %>%
+  mutate_if(is.factor, as.character) %>% # need this to be a character for the  following
+  mutate(gene = ifelse(gene %in% c("LUC7L2", "DDX41", "PRPF8", "U2AF1", "SF3B1", "SRSF2", "ZRSR2"), gene, "None")) %>%
+  mutate(mutation = gsub("ENSP.+:p\\.(\\w{3}\\d+).+", "\\1", mutation)) %>%
+  mutate(gene = ifelse(gene == "U2AF1", paste(gene, mutation, sep = "_"), gene)) %>%
+  mutate(gene = ifelse(grepl("U2AF1", gene), ifelse(gene %in% c("U2AF1_Ser34", "U2AF1_Gln157"), gene, "U2AF1_Other"), gene))
+
+cleaned_mutations$mutation <- NULL # only needed that for U2AF1
+fewer_duplicates <- cleaned_mutations %>% # don't care about multiple mutations in same gene
+  unique()
+
+# figure out what genes have at least 20 samples with mutations in them
+genes_of_interest <- fewer_duplicates %>%
+  group_by(gene) %>%
+  summarize(count = n()) %>%
+  filter(count > 20)
+
+# this will drop all samples without mutations in these genes but we will recover them in the next step
+only_interesting_mutations <- fewer_duplicates %>%
+  filter(gene %in% genes_of_interest$gene)
+```
+
+### Samples With No Mutations
+
+We also need to use `all_WGS_sample_ids` to identify samples with no mutation in any of the genes of interest but still had their whole genomes sequenced. Otherwise, when we merge this dataframe with the survival dataframe and remove all samples that aren't in both, we will lose those samples along with the samples that actually had no whole-genome sequencing data.
+
+```{r add_no_mutation_samples}
+# find all samples in all_WGS_sample_ids but not no_duplicates
+no_mutations <- all_WGS_samples[!sapply(all_WGS_samples, function(x) x %in% fewer_duplicates$sample_id)[,1],]
+
+# make that into a dataframe where mutation is always "None"
+no_mutations <- data.frame(sample_id = no_mutations, gene = "None")
+complete_mutation_info <- no_mutations %>%
+  rbind(only_interesting_mutations) %>%
+  mutate_if(is.factor, as.character)
+```
+
+### Restructure Mutation Data
+
+For the purposes of this model, we aren't interested in whether each sample has multiple splicing factor mutations or just one; we are assessing the influence that mutations in each splicing factor have on `survival` independently. So instead of having one column that lists all of the mutations in a particular sample, we want a column for each of the splicing factor mutations of interest with a 1 or 0 for each sample indicating whether or not it has that mutation.
+
+```{r reformat_mutations}
+# get one row per sample for samples with multiple mutations
+no_duplicates <- complete_mutation_info %>%
+  group_by(sample_id) %>%
+  arrange(gene) %>%
+  summarize(mutation = paste(gene, collapse = "&")) %>%
+  mutate(mutation = ifelse(grepl("None&", mutation), sub("None&", "", mutation), mutation)) %>%
+  mutate(mutation = ifelse(grepl("&None", mutation), sub("&None", "", mutation), mutation))
+
+reformatted_mutations <-no_duplicates %>%
+  mutate(SF3B1 = ifelse(grepl("SF3B1", mutation), 1, 0)) %>%
+  mutate(SRSF2 = ifelse(grepl("SRSF2", mutation), 1, 0)) %>%
+  mutate(U2AF1_Ser34 = ifelse(grepl("U2AF1_Ser34", mutation), 1, 0)) %>%
+  mutate(U2AF1_Gln157 = ifelse(grepl("U2AF1_Gln157", mutation), 1, 0)) %>%
+  select(-mutation)
+```
+
+## Expression Data
+
+We only need expression data for DDX41, LUC7L2, PRPF8, and ZRSR2, so we need to filter out just those rows and transpose the dataframe so that we have samples as rows.
+
+```{r expression_filter}
+expression_data <- raw_expression_data %>%
+  rownames_to_column("gene") %>%
+  filter(gene %in% c("LUC7L2", "DDX41", "PRPF8", "ZRSR2")) %>%
+  t(.) %>%
+  as.data.frame(.) %>%
+  rownames_to_column("sample_id")
+colnames(expression_data) <- c("sample_id","DDX41", "LUC7L2", "PRPF8", "ZRSR2")
+expression_data <- expression_data[-c(1),]  %>% # drop first row
+  mutate_at(vars(-sample_id), as.character) %>%
+  mutate_at(vars(-sample_id), as.numeric)
+```
+
+Expression for each gene is currently reported as the log base 2 of the number of RNA-seq reads that aligned to each gene divided by the total number of RNA-seq reads sequenced in each sample divided by 1 million. To make these numbers more understandable and to allow two expression values for two different genes to be directly compared, we will exponentiate and divide by the length of the mRNA of each gene to get reads aligned to the gene of interest per kilobase of total mRNA per million total reads in the sample, or RPKM for short.
+
+```{r get_rpkm}
+expression_data <- expression_data %>%
+  mutate(DDX41 = (2 ** DDX41) / 2.118) %>% # the mature DDX41 mRNA is 2,118 nucleotides long
+  mutate(LUC7L2 = (2** LUC7L2) / 2.661) %>%
+  mutate(PRPF8 = (2 ** PRPF8) / 7.276) %>%
+  mutate(ZRSR2 = (2 ** ZRSR2) / 3.987)
+```
+
+## Final Dataset
+
+```{r merge_preview}
+nrow(reformatted_mutations)
+nrow(clean_therapy)
+nrow(expression_data)
+```
+
+The two dataframes contain a different numbers of rows; not all samples had whole genome sequencing data, so some samples have no mutation information. Since we are planning to predict the efficacy of cancer treatments, we will do a complete case analysis to be confident in the validity of our results.
+
+```{r final_merge}
+tidy_data_dups <- full_join(full_join(clean_therapy, reformatted_mutations, by = "sample_id"), expression_data, by = "sample_id")
+leuk_data <- tidy_data_dups %>%
+  unique() %>%
+  filter(complete.cases(.))
+
+# write tidy data file 
+write.table(leuk_data, file = "tidy_data.tsv", quote = FALSE, sep = "\t", row.names = FALSE)
+```
+
+```{r cleanup}
+rm(all_clinicals, all_WGS_samples, AML_CMML_clinical_subset, AML_CMML_clinicals, AML_CMML_clinicals_bmt, cleaned_mutations, complete_mutation_info, concat_therapy, deletions, fewer_duplicates, full_mutation_info, genes_of_interest, MDS_clinical_subset, MDS_clinical_subset_1, MDS_clinical_subset_2, MDS_clinicals_1, MDS_clinicals_2, MDS_MPN_clinical_subset, MDS_MPN_clinicals, MDS_MPN_clinicals_bmt, no_duplicates, no_mutations, only_interesting_mutations, small_mutations, tidy_data_dups, clean_therapy, reformatted_mutations, raw_expression_data, expression_data)
+```
+
+# Data Ranges
+
+```{r data_ranges}
+leuk_data %>%
+  mutate_at(vars(-survival, -DDX41, -LUC7L2, -PRPF8, -ZRSR2), as.factor) %>%
+  Hmisc::describe()
+```
+
+# Codebook
+
+Variable     | Class             | Description                        | Range or Levels                                            
+-----------: | ----------------: | ---------------------------------: | ----------------------------------------------------------
+sample_id    | Sample ID         | Unique sample ID                   | MLL_00000 or MUC_00000 with many numbers skipped
+survival     | Numeric           | Survival in days                   | 0 - 12179
+death        | Binary            | Is patient known to be dead?       | 1 = Known to be dead, 0 = Not known to be dead
+leuk_type    | Multi-Categorical | Leukemia subtype                   | AML, CMML, MDS, MDS/MPN-U, MDS/MPN-RS-T
+therapy      | Multi-Categorical | Treatment administered to patient  | Azacytidine, BMT (bone marrow transplant), Cytarabine, Daunorubicin, Decitabine, Erythropoietin, Hydroxycarbamide, Hydroxyurea, Lenalidomide, Sorafenib
+SF3B1        | Binary  | Does patient have a mutation in SF3B1?                  | 1 = Yes, 0 = No
+SRSF2        | Binary  | Does patient have a mutation in SRSF2?                  | 1 = Yes, 0 = No
+U2AF1_Gln157 | Binary  | Does patient have a mutation at glutamine 157 in U2AF1? | 1 = Yes, 0 = No 
+U2AF1_Ser34  | Binary  | Does patient have a mutation at serine 34 in U2AF1?     | 1 = Yes, 0 = No
+DDX41        | Numeric | Expression of DDX41 in RPKM  | 5.8 - 33
+LUC7L2       | Numeric | Expression of LUC7L2 in RPKM | 1.0 - 9.6
+PRPF8        | Numeric | Expression of PRPF8 in RPKM  | 6.7 - 45
+ZRSR2        | Numeric | Expression of ZRSR2 in RPKM  | 0.65 - 8.3
+
+RPKM = RNA-seq reads that aligned to gene of interest / length of mature mRNA for gene of interest in kilobases / total number of RNA-seq reads from sample in millions
+
+# Research Questions
+
+## Background
+
+The data used in this study comes from sequencing data obtained from tumor biopsies from about 1,300 German leukemia patients in addition to clinical data about each patient. These data were gathered by the Munich Leukemia Laboratory, which has worked with a number of hospitals across Germany for several years. The raw sequencing data has been analyzed to quantify expression of a number of genes thought to be associated with leukemia and to identify the number, position, and characteristics of mutations in the same set of genes. 
+
+Devlin works in a lab at the Cleveland Clinic that studies the relationships between splicing factors (proteins that regulate the process of pre-mRNA splicing, a necessary step in the expression of all human genes), especially newly-identified splicing factors, in leukemia. Two of the graduate students there are specifically trying to characterize two recently-identified splicing factors, DDX41 and LUC7L2; the only thing currently known about them is the fact that many leukemia patients have mutations in them. Mutations in well-characterized splicing factors such as SF3B1, SRSF2 and U2AF1 are also commonly observed in leukemia patients, so we are trying to characterize these new splicing factors by comparing them to these well-characterized splicing factors. 
+
+Since MLL happened to provide information about the treatments administered to each of the patients in the dataset, we thought it might be interesting to see if we could find any differences in survival amongst the different treatment groups. Not all of the patients had the same subtype of leukemia, and it is well-known that different treatments work to different degrees amongst the different leukemia subtypes. Most of the patients have MyleoDysplastic Syndrome (MDS), followed by Acute Myleoid Leukemia (AML), and a relatively small number have Chronic MonoMyleocytic Leukemia (CMML). There are also a handful of patients with MDS / MyleoProliferative Neoplasms Unclassifiable (MDS/MPN-U) or MDS/MPN with Ring Sideroblasts and Thrombocytosis (MDS/MPN-RS-T), which are very rare and poorly-understood types of leukemia; since there are so few patients in our sample with either of these subtypes and there are multiple treatment groups, these patients are excluded from our analysis of the impact of treatment on survival.
+
+## Questions
+
+Do samples with low expression of DDX41, PRPF8, LUC7L2, or ZRSR2 and mutations in SRSF2, SF3B1, and/or U2AF1 have significantly lower hazard than patients with just mutations in SRSF2, SF3B1 or U2AF1 (and normal expression of DDX41, PRPF8, LUC7L2 and ZRSR2)?
+
+Do patients treated with daunorubicin or azacytidine have significantly different survival curves when accounting for leukemia subtypes?
+
+# Selecting Predictors of Survival From Interactions Between Expression and Mutation Variables
+
+We have a lot of interaction terms that might predict survival (four genes with expression and four genes with mutations makes 16 interactions), so we need to start by figuring out which of these interaction terms actually predict survival. It would make sense if several of these interaction terms made small contributions to survival, so we will use the lasso to subset our potential predictors.
+
+## Lasso
+
+```{r lasso}
+leuk_surv <- Surv(leuk_data$survival, leuk_data$death)
+fit1 <- with(leuk_data, coxph(leuk_surv ~ SF3B1 * DDX41 + SF3B1 * PRPF8 + SF3B1 * ZRSR2 + SF3B1 * LUC7L2 + SRSF2 * DDX41 + SRSF2 * LUC7L2 + SRSF2 * PRPF8 + SRSF2 * ZRSR2 + U2AF1_Ser34 * DDX41 + U2AF1_Ser34 * LUC7L2 + U2AF1_Ser34 * PRPF8 + U2AF1_Ser34 * ZRSR2 + U2AF1_Gln157 * DDX41 + U2AF1_Gln157 * LUC7L2 + U2AF1_Gln157 * PRPF8 + U2AF1_Gln157 * ZRSR2))
+
+preds <- model.matrix(leuk_surv ~ SF3B1 * DDX41  + SF3B1 * PRPF8 + SF3B1 * ZRSR2 + SF3B1 * LUC7L2 + SRSF2 * DDX41 + SRSF2 * LUC7L2 + SRSF2 * PRPF8 + SRSF2 * ZRSR2 + U2AF1_Ser34 * DDX41 + U2AF1_Ser34 * LUC7L2 + U2AF1_Ser34 * PRPF8 + U2AF1_Ser34 * ZRSR2 + U2AF1_Gln157 * DDX41 + U2AF1_Gln157 * LUC7L2 + U2AF1_Gln157 * PRPF8 + U2AF1_Gln157 * ZRSR2, data = leuk_data)
+lasso1 <- lars(preds, leuk_data$survival, type = "lasso")
+plot(lasso1)
+set.seed(432)
+lassocv <- cv.lars(preds, leuk_data$survival, K = 10)
+frac <- lassocv$index[which.min(lassocv$cv)]
+coef.cv <- coef(lasso1, s = frac, mode = "fraction")
+coef.cv[which(coef.cv > 0 | coef.cv < 0)] %>%knitr::kable()
+```
+
+The lasso selects the expression of ZRSR2, the interaction term between `SF3B1` and `DDX41`, the interaction term between `SF3B1` and `ZRSR2`, and the interaction term between `DDX41` and `SRSF2` as significant predictors of survival.
+
+## Summarizing the Smaller Model
+
+While the lasso only selected four predictors, three of them are interaction terms, so our final model has seven predictors when we include all of the individual interacting variables: `survival ~ DDX41 + ZRSR2 + SRSF2 + SF3B1 + DDX41 * SF3B1 + ZRSR2 * SF3B1 + DDX41 * SRSF2 + ZRSR2 * SRSF2`.
+
+```{r model_summary}
+fit2 <- with(leuk_data, coxph(leuk_surv ~ DDX41 + ZRSR2 + SRSF2 + SF3B1 + 
+                              DDX41 * SF3B1 + ZRSR2 * SF3B1 + DDX41 * SRSF2 + ZRSR2 * SRSF2))
+summary(fit2)
+```
+
+The predicted exponentiated coefficients for ZRSR2 and DDX41 expression are both right around 1 and include 1 in their 95% confidence intervals, so we do not expect hazard to change noticeably as expression of either gene increases or decreases. The predicted exponentiated coefficients for the indicator variables for mutations in SF3B1 and SRSF2 are both around 0.5, so we expect that patients with mutations in either gene to have lower hazard of dying, but the 95% confidence intervals for both estimates include 1, so this difference in hazard is not significant at the 95% confidence level.
+
+For the exponentiated coefficients, the Hazard Ratios are also close to 1 and include 1 in their 95% confidence intervals. The answer to our first research question appears to be a resounding no. For the sake of completeness, let's get these quality-of-fit statistics validated.
+
+```{r validated_stats}
+units(leuk_data$survival) <- "days"
+d <- datadist(leuk_data)
+options(datadist = "d")
+
+other_fit2 <- cph(leuk_surv ~ DDX41 + ZRSR2 + SRSF2 + SF3B1 + DDX41 * SF3B1 + ZRSR2 * SF3B1 + DDX41 * SRSF2 + ZRSR2 * SRSF2,
+    data = leuk_data, x = T, y = T, surv = T)
+validate(other_fit2)
+```
+
+The validated Somer's D corresponds to a C-statistic of 0.61, which is not an inspiring degree of discrimination; only a bit better than random chance. The validated Nagelkerke's R-squared is 0.065, which indicates that these predictors are very bad at explaining variation in the outcome.
+
+## Examining Model Assumptions
+
+```{r prop_hazards}
+cox.zph(fit2, transform = "km", global = TRUE)
+plot(cox.zph(fit2, transform = "km", global = TRUE))
+```
+
+These p-values are all pretty large except for SF3B1, which is statistically-significant if we use a 10% significance level. However, looking at the corresponding plot, it appears that there's just one outlier that probably bringing that p-value down. It seems like our model is bad because these predictors are just bad at predicting survival and not just because the data violates the proportional hazards assumption.
+
+## Conclusion
+
+Using interaction terms between the expression of DDX41, LUC7L2, PRPF8, and ZRSR2 and binary indicators of mutations in SF3B1, SRSF2, and U2AF1 does not create a statistically-significant or practically useful model for predicting survival in patients with certain subtypes of leukemia.
+
+# Impact of Treatments on Survival Times by Leukemia Subtype
+
+## Desecriptive Statistics of Luekemia Type and Leukemia Treatment:
+
+```{r}
+
+leuk_data$leuk_type %>% Hmisc::describe()
+leuk_data$therapy %>% Hmisc::describe()
+print(table(leuk_data$death))
+
+typetherapy <- table(leuk_data$leuk_type, leuk_data$therapy)
+typetherapy
+
+```
+
+The most common Leukemia Types are MDS and AML, so we will be running analyses on these two leukemia types. We will also be using the two most common types of therapy as our comparison groups, Daunorubicin and Azacytidine.
+
+## Separation of Data into the two most common Leukemia Types:
+
+```{r}
+
+leuk_dataAML <- subset(leuk_data, leuk_data$leuk_type == "AML")
+leuk_dataMDS <- subset(leuk_data, leuk_data$leuk_type == "MDS")
+
+#leuk_dataAML$survival %>% Hmisc::describe()
+#leuk_dataMDS$survival %>% Hmisc::describe()
+
+#print(table(leuk_dataAML$death))
+#print(table(leuk_dataMDS$death)) 
+
+```
+
+## Creation of new Treatment Therapy Variable (daunorubicin/azactyidine)
+
+```{r}
+
+leuk_dataAML$newtherapy <- ifelse(leuk_dataAML$therapy == "daunorubicin", "daunorubicin", ifelse(leuk_dataAML$therapy == "azacytidine", "azacytidine", NA))
+
+leuk_dataMDS$newtherapy <- ifelse(leuk_dataMDS$therapy == "daunorubicin", "daunorubicin", ifelse(leuk_dataMDS$therapy == "azacytidine", "azacytidine", NA))
+
+```
+
+
+## Creation of the KM model and plot:
+
+```{r}
+
+AMLsurv <- Surv(time = leuk_dataAML$survival, event = leuk_dataAML$death)
+MDSsurv <- Surv(time = leuk_dataMDS$survival, event = leuk_dataMDS$death)
+
+AMLfit <- survfit(AMLsurv ~ leuk_dataAML$newtherapy)
+MDSfit <- survfit(MDSsurv ~ leuk_dataMDS$newtherapy)
+
+ggsurvplot(AMLfit, data = leuk_dataAML,
+           conf.int = TRUE,
+           xlab = "Time in Days",
+           break.time.by = 365,
+           legend.labs = c("Azacytidine", "Daunorubicin"), xlim = c(0,1095), title = "AML Survival Between Daunorubicin and Azacytidine", risk.table = TRUE, legend = "none", risk.table.height = 0.30
+           )
+
+ggsurvplot(MDSfit, data = leuk_dataMDS,
+           conf.int = TRUE,
+           xlab = "Time in Days",
+           break.time.by = 365,
+           legend.labs = c( "Azacytidine","Daunorubicin"), xlim = c(0, 4380), title = "MDS Survival Between Daunorubicin and Azacytidine", risk.table = TRUE, legend = "none", risk.table.height = 0.30
+           )
+
+```
+
+MDS leukemia patients were followed for a longer period than the AML leukemia patients. This is because AML leukemia is a more critical condition than MDS. While AML can be fatal, it can be treated. MDS leukemia is a more chronic condition than AML leukemia, hence the longer time period of follow-up.
+
+It would seem from the survival curves that Azacytidine does better for AML patients but not so for MDS. The survival curves do cross for the AML group but not for the MDS group. 
+
+## Look at Median Survival Between the Two Treatments:
+
+```{r}
+
+print(AMLfit, print.rmean=TRUE)
+print(MDSfit, print.rmean=TRUE)
+
+```
+
+The Median Survival Times are listed above. A longer survival time is good for our model. It seems that Azacytidine has an almost 500 days better median survival time for AML patients, though it has a 2300 days worse median survival time for MDS patients.
+
+## Log Rank Test:
+
+```{r}
+
+survdiff(AMLsurv ~ leuk_dataAML$newtherapy)
+survdiff(MDSsurv ~ leuk_dataMDS$newtherapy)
+
+```
+
+If we perform a log rank test between the two treatments stratified by leukemia patient, it would seem that there is no difference in survival curves for the AML patients. However, for the MDS patients it looks like that daunorubicin performs better than azacyitidine. This is interesting, since Azacytidine is primarily a treatment for MDS, where Daunorubicin is a chemotherapy drug that is specifically used to treat various types of leukemia, one of which is AML and not MDS.
+
+## Wilcoxon Test:
+
+```{r}
+
+survdiff(AMLsurv ~ leuk_dataAML$newtherapy, rho = 1)
+survdiff(MDSsurv ~ leuk_dataMDS$newtherapy, rho = 1)
+
+```
+
+Even if we use a Wilcoxon test, our conclusions do not change from the Log Rank Test.
+
+# Final Conclusions 
+
+We created a Cox proportional hazards model to assess whether mutations in or low expression of various splicing factors associated with leukemia had an effect on patient survival. After using the lasso to narrow down the list of potential interaction terms, the final cox model (DDX41, ZRSR2, SRSF2, SF3B1, DDX41xSF3B1, ZRSR2xSF3B1, DDX41xSRSF2, and ZRSR2xSRSF2) showed that none of the mutation or expression variables or interaction terms between them significantly changed the hazard of death. We attempted to identify the most effective treatment within each leukemia subtype using log-rank and Wilcoxon tests. Due to sample size constraints, we only compared the survival between AML and MDS patients who received azacytidine or daunorubicin. We determined that there was not a significant difference in survival between the two treatment groups of AML patients, but that daunorubicin performs significantly better than azacytidine amongst MDS patients.
+
+Our analyses were harshly constrained by the small sample size we had available to us; many patients lacked treatment information, and it is not reasonable to impute treatment information when trying to make judgments about the efficacy of treatments. Once all of the patients without treatment information were dropped, there weren't enough CMML, MDS/MPN-U or MDS/MPN-RS-T patients remaining to perform meaningful comparisons between treatment groups, and all treatments but azacytidine and daunorubicin were administered to too few people to allow for meaningful comparisons. If MLL had provided more and better-quality treatment information for these patients, our analyses would have been much more robust, but there is nothing to be done about that. 
+
+Going forward, it will likely be productive to re-examine the impact of splicing factor mutations and expression levels without requiring all samples to also have clinical data; few patients had particularly low expression of any of the four splicing factors of interest in the first place, so increasing the sample size there should be particularly impactful. It may also be a bit easier to answer the first research question by splitting samples into low- and normal-expression groups for each of the four splicing factors of interest and then performing log-rank tests on all of the interactions between the mutation groups and the expression groups.
+
+# SessionInfo
+
+```{r session_info}
+sessionInfo()
+```
+

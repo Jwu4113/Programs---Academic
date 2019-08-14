@@ -1,0 +1,361 @@
+---
+title: "Effects of BMI, Income, Race and Blood Lead Levels on Blood Mercury Levels"
+author: "Devlin Moyer and Joshua Wu"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+        theme: sandstone
+        highlight: kate
+        number_sections: yes
+        toc: true
+        toc_float: true
+        code_folding: show
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, comment = NA, fig.width = 12, fig.height = 8)
+```
+
+# Setup {-}
+
+```{r load_packages, message=FALSE}
+library(Hmisc); library(skimr); library(plyr); library(rms); library(knitr); library(tidyverse)
+```
+
+# Task 1: Data Source
+
+The data used for this project is the [2015-2016 NHANES data](https://wwwn.cdc.gov/nchs/nhanes/continuousnhanes/default.aspx?BeginYear=2015). These data were obtained from the NHANES Questionnaires, Datasets, and Related Documentation section. We used the following three subsets of the NHANES data: Demographics, Laboratory - Blood Lead, Cadmium, Total Mercury, Selenium, and Manganese, and Examination - Body Measures. All files were downloaded from the website. NHANES data was gathered from interviews in the participants home. The examinations were conducted in mobile examination centers. Staff at The National Center for Health Statistics (NCHS), Division of Health and Nutrition Examination Surveys (DHANES), part of the Centers for Disease Control and Prevention (CDC) conducted the survey for the purpose of obtaining health and nutrition data. The sampling was done in four stages:
+
++ Selection of primary sampling units (PSUs), which are counties or small groups of contiguous counties.
++ Selection of segments within PSUs that constitute a block or group of blocks containing a cluster of households.
++ Selection of specific households within segments.
++ Selection of individuals within a household.
+
+The raw NHANES data are provided in SAS export files, so we do not have csv files containing the raw data.
+
+# Task 2: Read and Tidy Input Data
+
+## Load Data
+
+The column classes in the dataframes returned by `sasxport.get` were "S3:labelled" and those were causing all sorts of problems, so we've immediately called `unclass` on each column to get the columns to be conventional integer, double and character classes.
+
+```{r read_input}
+body_measures <- as.data.frame(lapply(sasxport.get("BMX_I.XPT"), unclass))
+demographics <- as.data.frame(lapply(sasxport.get("DEMO_I.XPT"), unclass))
+blood_levels <- as.data.frame(lapply(sasxport.get("PBCD_I.XPT"), unclass))
+```
+
+## Subset, Merge, and Tidy Names
+
+The variables names assigned by NHANES are not the most parsable strings, so as soon as we merge together all our variables of interest we will give each variable a much more user-friendly name.
+
+```{r merge_and_rename}
+bmi_data <- select(body_measures, seqn, bmxbmi)
+race_income_data <- select(demographics, seqn, ridreth1, indfmin2, dmdhrgnd)
+blood_pb_hg_data <- select(blood_levels, seqn, lbxthg, lbdthglc, lbxbpb)
+
+raw_data <- merge(merge(bmi_data, race_income_data, by = "seqn"), blood_pb_hg_data, by = "seqn")
+colnames(raw_data) <- c("patient_id", "bmi", "race", "income", "sex", "blood_mercury", "mercury_detection", "blood_lead")
+```
+
+Now that we have pulled out only our variables of interest, we have `r nrow(raw_data)` observations of 6 variables (plus a sample ID). 
+
+## Tidy Factors
+
+Two of our categorical variables, `race` and `income`, were recorded as integers in the raw data, so we need to replace those integers with helpful words and encode them as factors instead of integers. The other categorical variable, `sex`, needs to be recoded from having levels of 1 and 2 to having levels of "Male" and "Female". We will also be converting `blood_mercury` from a quantitative variable to a binary one.
+
+```{r tidy_factors}
+cleaned_factors <- raw_data %>%
+  select(patient_id, mercury_detection, blood_mercury, blood_lead, bmi, sex, race, income) %>% # order columns nicely
+  mutate_if(is.integer, as.factor) %>%
+  mutate(race = revalue(race, c("1" = "Mexican American",
+                                "2" = "Other Hispanic",
+                                "3" = "White",
+                                "4" = "Black",
+                                "5" = "Other"))) %>%
+  mutate(income = revalue(income, c("1" = "0-4999",
+                                    "2" = "5000-9999",
+                                    "3" = "10000-14999",
+                                    "4" = "15000-19999",
+                                    "5" = "20000-24999",
+                                    "6" = "25000-34999",
+                                    "7" = "35000-44999",
+                                    "8" = "45000-54999",
+                                    "9" = "55000-64999",
+                                    "10" = "65000-74999",
+                                    "12" = "Over 20000",
+                                    "13" = "Under 20000", 
+                                    "14" = "75000-99999",
+                                    "15" = "Over 100000",
+                                    "77" = NA,
+                                    "99" = NA))) %>%
+  mutate(sex = revalue(sex, c("1" = "Male",
+                              "2" = "Female"))) %>%
+  mutate(mercury_detection = revalue(mercury_detection, 
+                                        c("0" = "1",
+                                        "1" = "0"))) %>%
+  mutate(mercury_detection = relevel(mercury_detection, "0")) %>%
+  mutate(race = relevel(race, "White"))
+```
+
+In the interest of not spending 11 degrees of freedom on very specific income categories, we will also collapse several of the income categories together into just three levels. For some reason, NHANES decided to include several income brackets in addition to simple "Over \$20k" and "Under \$20k" categories that completely overlap the other categories, so we're going to include the "Under 20000" samples in our new "Low" income level and drop all of our "Over 20000" samples, since we already have many more than the 1000 sample maximum.
+
+```{r tidy_income_levels}
+fewer_factors <- cleaned_factors %>%
+  filter(income != "Over 20000") %>%
+  mutate(income = fct_recode(income, NULL = "Over 20000")) %>%
+  mutate(income = fct_collapse(income, 
+                               "Low" = c("0-4999", "5000-9999", "10000-14999", "15000-19999",
+                                         "20000-24999", "25000-34999", "Under 20000"),
+                               "Middle" = c("35000-44999", "45000-54999", "55000-64999", "65000-74999"),
+                               "High" = c("75000-99999", "Over 100000"))) 
+```
+
+## Random Subset
+
+Since we are still well above the 1000 sample maximum, we will randomly select 1000 samples. To make life easier, we will also subset for samples with complete cases first.
+
+```{r random_subset}
+set.seed(10022019)
+blood_metal_data <- fewer_factors %>%
+  filter(complete.cases(.)) %>%
+  sample_n(1000)
+
+# deinitely don't need those sticking around
+rownames(blood_metal_data) <- NULL
+
+# write out tidied dataset as a .csv
+write.csv(blood_metal_data, file = "nhanes_blood_race_income.csv", quote = FALSE)
+
+# no need to leave these around cluttering up our environment
+rm(blood_levels, blood_pb_hg_data, bmi_data, body_measures, cleaned_factors, demographics, fewer_factors, race_income_data, raw_data)
+```
+
+# Task 3: Tidied Tibble
+
+```{r tidy_tibble}
+tbl_df(blood_metal_data)
+skim_with(numeric = list(hist = NULL), integer = list(hist = NULL))
+skim(blood_metal_data)
+```
+
+There are 1000 observations of 7 variables (one of the columns is just a sample ID). 
+
+# Task 4: Sample Descriptions
+
+The 1,000 samples studied here represent a subset of the 15,327 individuals surveyed in the 2015-2016 NHANES survey cycle. 9,971 of these individuals were interviewed and 9,544 were examined. The 1,000 sample subset was randomly selected from these responses. In the subset of samples studied here, it appears that there are 148 samples that were interviewed but not examined. 
+
+# Task 5: Code Book
+
+Variable            | Class     | Description                | Range or Levels                                            
+------------------: | --------: | -------------------------: | ----------------------------------------------------------
+`patient_id`        | Sample ID | Sample ID                  | 3 - 5794 (with many skipped numbers)
+`mercury_detection` | Binary    | Mercury Detection Limit    | 0 = At or above detection limit, 1 = Below detection limit
+`blood_mercury`     | Numeric   | Amount of Mercury in Blood | 0 .20 - 34.91
+`blood_lead`        | Numeric   | Amount of Lead in Blood    | 0.07 - 23.51
+`bmi`               | Numeric   | Body-Mass Index            | 12.7 - 63.9
+`sex`               | Binary    | Sex                        | Male, Female
+`race`              | Multi-Categorical | Race               | White, Black, Mexican-American, Other Hispanic, Other     
+`income`            | Multi-Categorical | Income Level       | Low (< \$35,000), Middle (\$35,000-\$75,000), High (> $75,000)
+
+# Task 6: Variable Descriptions
+
+* Our unique sample ID for each sample is `patient_id`.
+* Our binary outcome is `mercury_detection`, whether the amount of mercury in the blood was above or below the detection level (0.28 micrograms per liter).
+* Our quantitative outcome is `blood_mercury`, the amount of mercury in the blood in micrograms per deciliter.
+* Our first quantitative input is `blood_lead`, the amount of lead in the blood in migrogram per deciliter. 
+* Our other quantitative input is `bmi`, the body-mass index, in kilograms per meters squared. 
+* Our binary input is `sex`, the sample's sex.
+* Our first multi-categorical input is `race`, the sample's race. 
+* Our other multi-categorical input is `income`, the sample's annual family income level.
+
+
+# Task 7: Linear Regression Outline
+
+Our linear regression model will try to predict the amount of mercury in the blood of respondents to the NHANES survey using four predictors: BMI, race, annual family income, and the amount of lead in the blood.
+
+# Task 8: Logistic Regression Outline
+
+Our logistic regression model will try to predict whether or not the amount of mercury in the blood of respondents to the NHANES survey are above or below the detection limit using four predictors: BMI, race, annual family income, and the amount of lead in the blood.
+
+# Task 9: Affirmation
+
+The NHANES 2015-2016 dataset is freely available for public use. We are certain that it is completely appropriate for these data to be shared with anyone, without any conditions. There are no concerns about privacy or security, mostly because the data have been on a public website for many years, and are completely free of identifying information about individual subjects.
+
+# Task 10: The Linear Regression
+
+## Nonlinear Terms
+
+Since our model already has only five predictors, let's just focus on identifying which (if any) predictors might need to be modeled with nonlinear terms, then eventually assess how important those nonlinear terms were for the predictive quality of our model.
+
+```{r rho_sq}
+plot(Hmisc::spearman2(blood_mercury ~ bmi + race + income + sex + blood_lead, data = blood_metal_data))
+```
+
+Looks like we should consider a nonlinear term for `bmi` and perhaps also `blood_lead`.
+
+```{r nonlinear_model}
+d <- datadist(blood_metal_data)
+options(datadist = "d")
+
+nonlinear_model <- ols(blood_mercury ~ rcs(bmi, 4) + rcs(blood_lead, 4) + race + income + sex, data = blood_metal_data, x = T, y = T)
+summary.lm(nonlinear_model)
+```
+
+It appears that restricted cubic splines on both `bmi` and `blood_lead` contribute meaningfully to the predictive power of the model. It also appears that `income` and `sex` are not contributing much to the predictive power of our model, which is unfortunate. Let's compare this to the simple linear model to see how much the nonlinear terms improve our predictions:
+
+```{r simple_anova}
+summary.lm(lm(blood_mercury ~ bmi + blood_lead + race + income + sex, data = blood_metal_data))
+```
+
+The nonlinear terms account for another 5% of the variation in `blood_mercury`, which is a decent improvement. The R-squared value is still low enough to not be of any practical significance, but it's better than nothing.
+
+Let's visualize the role of these nonlinear terms with a nomogram:
+
+```{r nomogram}
+plot(nomogram(nonlinear_model))
+```
+
+The BMI scale wraps around such that people with intermediate BMIs are predicted to have higher concentrations of mercury in their blood than people with very low or very high BMIs, holding all other predictors constant. The `blood_lead` scale also wraps around such that both people with very low and very high concentration of lead in the blood are predicted to have lower concentrations of mercury in their blood than people with intermediate concentration of lead in their blood, holding all other predictors constant.
+
+According to this nomogram, a white male who makes more than $75,000, has no lead in his blood and has a BMI of 20 has 0 (white) + 5 (male) + 20 (high income) + 20 (no lead) + 79 (BMI of 20) = 124 points, so we would predict that he has 0.75 micrograms of mercury in every deciliter of his blood.
+
+## Effect Sizes
+
+Let's take a closer look at the effects each of our predictors have on the outcome:
+
+```{r effects}
+plot(summary(nonlinear_model))
+ggplot(Predict(nonlinear_model))
+```
+
+Interestingly, `race` tells us almost nothing about a sample's `blood_mercury`, unless they're neither White, Black or Hispanic; then we predict a much higher concentration of mercury in their blood. `blood_lead` and `bmi` predict that `blood_mercury` is low if they're small, but otherwise predict a nearly constant value of `blood_mercury`. As we saw earlier, `income` and `sex` do not provide any meaningful information for predicting `blood_mercury`.
+
+## Quality of Model
+
+Let's assess the quality of our model by validating the associated statistics and checking our regression assumptions.
+
+### Validation
+
+```{r validation}
+set.seed(432)
+validate(nonlinear_model)
+```
+
+It seems that the model was slightly overfit, as the R-squared dropped by 0.03 after validation. Even after validation, our model only explains 13% of the variation in `blood_mercury`, which is not an impressively large amount of variation.
+
+### Regression Assumptions
+
+```{r residuals_plots}
+par(mfrow = c(2,2))
+plot(lm(blood_mercury ~ rcs(bmi, 4) + rcs(blood_lead, 4) + race + income + sex, data = blood_metal_data))
+```
+
+There's a sharp lower bound evident on the residuals vs fitted plot, which is due to the fact that people can't have a negative concentration of mercury in their blood. The model has higher residuals when it predicts higher values for the outcome, as evidenced by the slope in the scale-location plot, the heavy right tail on the QQ plot, and the faint fan shape (wider on the right) evident in the residuals vs fitted plot. The only two points that stand out on the leverage plot are not influential enough to merit further investigation, as they both fall decently far below the 0.5 Cook's distance threshold.
+
+# Task 11: The Logistic Regression
+
+As previously mentioned, we will be assessing whether or not the following predictors affect whether being below or under the mercury detection limit (0.28 microg/L) in the blood: blood lead levels, bmi, sex, race, and family income.
+
+## LRM and ANOVA for our Model Before adding non-linear terms:
+
+```{r ANOVA for our Potential Model before fitting non-linear terms, warning=FALSE}
+
+d <- datadist(blood_metal_data)
+options(datadist = "d")
+
+LogRegModel_1 <- lrm(mercury_detection ~ blood_lead + bmi + sex + race + income, 
+            data = blood_metal_data, 
+            x = TRUE, y = TRUE)
+
+LogRegModel_1
+
+anova(LogRegModel_1)
+
+```
+
+Our LRM details a C statistic of 0.726, this is not good, we would ideally like 0.8 and above. In addition, our R2 is also poor at 0.177. Our Brier score is 0.171, which is acceptable. It has a range from 0 to 1, and the lower the score, the better. The Likelihood Ratio Test is significant, indicating that some of our predictors are useful in the prediction of whether a subject has a blood mercury level above the detection limit. 
+
+After running an ANOVA on our kitchen sink regression model, we find that the most useful predictors in our model are blood lead levels, BMI, and Race.
+
+As for degrees of freedom, we can only spend 10-20 degrees of freedom on our model (N/P = 100 to N/P = 50), and as we can see, it already has 9 degrees of freedom. Therefore, we will create a Spearman Rho2 plot to decide which of our predictors we will fit a non-linear term on, since we already established that these are the predictors we want to have in our model. Having that non-linear term will allow us to spend as many degrees of freedom as we can without overfitting the model.
+
+## Spearman Rho2 Plot:
+
+```{r Spearman Rho2}
+
+plot(spearman2(mercury_detection ~ blood_lead + bmi + sex + race + income, data = blood_metal_data))
+
+```
+
+We want to stay as close to 10 degrees of freedom as we can, and since our model already contains 9, we will use a cubic spline with 3 knots on our bmi predictor, since it seems that it will be most useful there. As we can see above, the most useful variable to have a non-linear term applied to it is BMI, with it's p2 furthest to the right.
+
+## Adding the Cubic Spline to the Model:
+
+```{r Adding the Cubic Spline with 3 knots, warning=FALSE}
+
+LogRegModel_2 <- lrm(mercury_detection ~ blood_lead + rcs(bmi,3) + sex + race + income, 
+            data = blood_metal_data, 
+            x = TRUE, y = TRUE)
+
+LogRegModel_2
+anova(LogRegModel_2)
+
+```
+
+If we look at our new model with the cubic spline with 3 knots on BMI, we see that there are very slight increases to the C statistic and the R2 value. However, our conclusions do not change from our original kitchen sink model. The Brier score remained the same, and the Likelihood Ratio test still maintained a significant p-value. We also see that for our cubic spline that the significance of BMI comes from the linear term rather than the Non-Linear restricted cubic spline.
+
+Even though the non-linear term did not end up being signifcant, since our R2 and C statistic was marginally better in this model, we will proceed to use this model since it has a better fit than our kitchen sink model, albeit not that much better. 
+
+## Validation of our Kitchen Sink Model and our New Model Using 100 Bootstrap Replications:
+
+```{r}
+
+set.seed(03102019)
+validate(LogRegModel_1, B = 100)
+validate(LogRegModel_2, B = 100)
+
+```
+
+For our Kitchen Sink Model, our Corrected C statistic is .7106 and our R2 is 0.1510. For our Non-Linear Model, our corrected C Statistic is 0.7163 and our R2 is 0.1599. As we can see, after validation, our model is still poor for both the Kitchen Sink Model and our Non-Linear Model. However, the Model with the Non-Linear Term did marginally better than our Kitchen Sink Model in terms of the C statistic and R2 value, therefore, it will be our final model
+
+## Plot Effects for Our Model with the Non-Linear Term:
+
+```{r}
+
+plot(summary(LogRegModel_2))
+summary(LogRegModel_2)
+
+```
+
+Our final model that we landed was the model that included the restricted cubic spline on BMI. 
+
+From our effects plot,it was seen that if blood lead levels increase from 0.4575 to 1.21 micrograms/deciliter, the odds of obtaining a blood mercury level above the detection level is significantly higher at 1.21 micrograms/deciliter than .4575 micrograms/deciliter with having the higher blood lead level resulting in a 1.34 times the odds  with a 95% CI of (1.13 , 1.58), holding all else constant. 
+
+Holding all else constant, it was also found that if we had two subjects, one with a BMI or 18.3 and another with a BMI of 29.43, that the subject with the larger BMI has 3.23 (95% CI 2.47, 4.22) times the odds of having a blood mercury above the detection level than the subject with the smaller BMI. 
+
+Holding all other predictors constant, and using Race:White as the reference category, it was found that all other race categories had significantly higher odds of having blood mercury levels above the detection level. Mexican Americans had 2.0 times the odds than Whites (1.30, 3.07). Other Hispanics had 2.82 times the odds than Whites (1.72, 4.64). Blacks had 1.67 times the odds than Whites (1.08, 2.57). And Other had 3.47 times the odds than Whites (2.05, 5.88). 
+
+In terms of income, only people who lived with family incomes greater than 75,000 dollars a year had a significantly higher odds of getting blood mercury levels above the detection limit (1.53, 95%CI: 1.03, 2.28), holding all else constant.
+
+Holding all else constant, Sex did not seem to have an impact on whether one had blood mercury levels above the detection limit. In addition, having a family income of 35,000-74,999 dollars per year did not seem to have a significant difference in odds of having blood mercury levels above the detection limit when compared to people living with family incomes of less than 35,000 dollars per year.
+
+## Nomogram:
+
+```{r}
+
+plot(nomogram(LogRegModel_2, fun=plogis, fun.at=c(0.05, seq(0.1, 0.9, by = 0.1), 0.95), funlabel = "Pr(Mercury_Detection)"))
+
+```
+
+We can also use a Nomogram to try to predict new cases based on our data. For example, if we had a Male (0) + White (0) + High Income (7.5) + with 10 micrograms/dL of lead in blood (50) + With a BMI of 20 (19), we would calculate the number of total points, which is 76.5, which tells us that our log Odds Ratio of having a blood mercury level is above the detection limit is roughly 4. 
+
+# Task 12: The Reflection
+
+
+
+# Session Info {-}
+
+```{r session_info}
+sessionInfo()
+```
